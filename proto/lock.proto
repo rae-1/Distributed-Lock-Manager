@@ -1,0 +1,53 @@
+syntax = "proto3";
+
+package lock_service;
+
+option go_package = "./lock";
+
+// Lock acquisition/release arguments
+message lock_args {
+    int32 client_id = 1;
+}
+
+// Server return status codes
+enum Status {
+    SUCCESS = 0;      // Operation succeeded
+    FILE_ERROR = 1;   // File not found or other file-related error
+    LOCK_ERROR = 2;   // Lock could not be acquired or released
+}
+
+// Response struct returned by server
+message Response {
+    Status status = 1;
+    string message = 2;  // Optional message for more detailed responses
+}
+
+// File append arguments
+message file_args {
+    string filename = 1;
+    bytes content = 2;
+    int32 client_id = 3;
+}
+
+// Simple integer container for client ID and return codes
+message Int {
+    int32 rc = 1;
+}
+
+// The lock service definition
+service LockService {
+    // Initialize client connection with server
+    rpc client_init(Int) returns (Int);
+    
+    // Client requests to acquire the lock (blocking)
+    rpc lock_acquire(lock_args) returns (Response);
+    
+    // Client releases a previously acquired lock
+    rpc lock_release(lock_args) returns (Response);
+    
+    // Client appends data to a file (requires lock)
+    rpc file_append(file_args) returns (Response);
+    
+    // Client terminates connection with server
+    rpc client_close(Int) returns (Int);
+}
