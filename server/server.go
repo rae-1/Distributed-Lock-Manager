@@ -103,12 +103,19 @@ func (s *server) LockAcquire(ctx context.Context, in *pb.LockArgs) (*pb.Response
 		select {
 		case <-ctx.Done():
 			fmt.Printf("client %d disconnected or timed out\n", clientID)
+
 			// Remove client from wait queue
 			s.queueMutex.Lock()
 			if clientWaitIndex < len(s.waitQueue) {
 				s.waitQueue = append(s.waitQueue[:clientWaitIndex], s.waitQueue[clientWaitIndex+1:]...)
 			}
 			s.queueMutex.Unlock()
+
+			// Remove client from heartbeat-checking
+			s.heartbeatMutex.Lock()
+			delete(s.lastHeartbeat, clientID)
+			s.heartbeatMutex.Unlock()
+
 			return nil, ctx.Err()
 		default:
 			// Continue waiting
