@@ -17,13 +17,15 @@ import (
 
 type server struct {
 	pb.UnimplementedLockServiceServer
-	clientCounter int32
-	fileLock      sync.Mutex     // Global lock for all files
-	waitQueue     []int32        // Client IDs waiting for the lock
-	queueMutex    sync.Mutex     // Mutex for the wait queue
-	lockHolder    int32          // Current lock holder
-	clients       map[int32]bool // Active clients
-	clientMutex   sync.Mutex     // Mutex for the clients map
+	clientCounter  int32
+	fileLock       sync.Mutex          // Global lock for all files
+	waitQueue      []int32             // Client IDs waiting for the lock
+	queueMutex     sync.Mutex          // Mutex for the wait queue
+	lockHolder     int32               // Current lock holder
+	clientMutex    sync.Mutex          // Mutex for creating a new clientID
+	lastHeartbeat  map[int32]time.Time // Track last heartbeat time for each (active) client
+	heartbeatMutex sync.Mutex          // Mutex for the heartbeat map
+	// clients       map[int32]bool    // Active clients
 }
 
 func createFiles() error {
@@ -33,7 +35,8 @@ func createFiles() error {
 	}
 
 	// Create 100 files as required
-	for i := 0; i < 100; i++ {
+	numFiles := 100
+	for i := 0; i < numFiles; i++ {
 		fileName := filepath.Join(dirName, fmt.Sprintf("file_%d", i))
 		file, err := os.Create(fileName)
 		if err != nil {
@@ -44,11 +47,21 @@ func createFiles() error {
 	return nil
 }
 
+func (s *server) Heartbeat(ctx context.Context, in *pb.Int) (*pb.Response, error) {
+	clientID := in.Rc
+
+	s.heartbeatMutex.Lock()
+	s.lastHeartbeat[clientID] = time.Now()
+	s.heartbeatMutex.Unlock()
+
+	return &pb.Response{Status: pb.Status_SUCCESS}, nil
+}
+
 func (s *server) ClientInit(ctx context.Context, in *pb.Int) (*pb.Int, error) {
 	s.clientMutex.Lock()
 	s.clientCounter++
 	clientID := s.clientCounter
-	s.clients[clientID] = true
+	// s.clients[clientID] = true
 	s.clientMutex.Unlock()
 
 	log.Printf("Client initialized with ID: %d", clientID)
@@ -89,6 +102,7 @@ func (s *server) LockAcquire(ctx context.Context, in *pb.LockArgs) (*pb.Response
 		// Check if context is done (client disconnected or timed out)
 		select {
 		case <-ctx.Done():
+			fmt.Printf("client %d disconnected or timed out\n", clientID)
 			// Remove client from wait queue
 			s.queueMutex.Lock()
 			if clientWaitIndex < len(s.waitQueue) {
@@ -169,9 +183,14 @@ func (s *server) ClientClose(ctx context.Context, in *pb.Int) (*pb.Int, error) {
 	clientID := in.Rc
 	log.Printf("Client %d disconnecting", clientID)
 
-	s.clientMutex.Lock()
-	delete(s.clients, clientID)
-	s.clientMutex.Unlock()
+	// s.clientMutex.Lock()
+	// delete(s.clients, clientID)
+	// s.clientMutex.Unlock()
+
+	// Remove from heartbeat tracking
+	s.heartbeatMutex.Lock()
+	delete(s.lastHeartbeat, clientID)
+	s.heartbeatMutex.Unlock()
 
 	// If the client held the lock, release it
 	s.queueMutex.Lock()
@@ -205,7 +224,7 @@ func main() {
 		log.Fatalf("Failed to listen: %v", err)
 	}
 
-	// Create the 100 files
+	// Create 100 files
 	if err := createFiles(); err != nil {
 		log.Fatalf("Failed to create files: %v", err)
 	}
@@ -215,12 +234,67 @@ func main() {
 		clientCounter: 0,
 		lockHolder:    0,
 		waitQueue:     make([]int32, 0),
-		clients:       make(map[int32]bool),
+		// clients:       make(map[int32]bool),
+		lastHeartbeat: make(map[int32]time.Time),
 	}
+
+	// Starting heartbeat checker goroutine
+	go lockServer.checkHeartbeats()
+
 	pb.RegisterLockServiceServer(s, lockServer)
 
 	log.Printf("Lock server listening on port %d", port)
 	if err := s.Serve(lis); err != nil {
 		log.Fatalf("Failed to serve: %v", err)
+	}
+}
+
+func (s *server) checkHeartbeats() {
+	heartbeatTimeout := 5 * time.Second
+	ticker := time.NewTicker(1 * time.Second)
+
+	for {
+		<-ticker.C
+		now := time.Now()
+
+		s.heartbeatMutex.Lock()
+		// s.clientMutex.Lock()
+
+		// Check for inactive clients
+		for clientID, lastBeat := range s.lastHeartbeat {
+			if now.Sub(lastBeat) > heartbeatTimeout {
+				log.Printf("Client %d considered inactive (no heartbeat for %v)", clientID, heartbeatTimeout)
+
+				// Handle inactive client, similar to what happens in ctx.Done()
+				// Clean up wait queue
+				s.queueMutex.Lock()
+				for i, id := range s.waitQueue {
+					if id == clientID {
+						s.waitQueue = append(s.waitQueue[:i], s.waitQueue[i+1:]...)
+						break
+					}
+				}
+
+				// Release lock if client was the holder
+				if s.lockHolder == clientID {
+					if len(s.waitQueue) > 0 {
+						s.lockHolder = s.waitQueue[0]
+						s.waitQueue = s.waitQueue[1:]
+						log.Printf("Lock transferred to client %d after previous holder inactive", s.lockHolder)
+					} else {
+						s.lockHolder = 0
+						log.Printf("Lock released after holder inactive")
+					}
+				}
+				s.queueMutex.Unlock()
+
+				// Remove client records
+				// delete(s.clients, clientID)
+				delete(s.lastHeartbeat, clientID)
+			}
+		}
+
+		// s.clientMutex.Unlock()
+		s.heartbeatMutex.Unlock()
 	}
 }

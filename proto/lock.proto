@@ -50,4 +50,7 @@ service LockService {
     
     // Client terminates connection with server
     rpc client_close(Int) returns (Int);
+
+    // Client heartbeat to indicate it's still active
+    rpc heartbeat(Int) returns (Response);
 }

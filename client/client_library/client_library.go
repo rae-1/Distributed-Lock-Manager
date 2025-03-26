@@ -13,9 +13,42 @@ import (
 )
 
 type RpcConn struct {
-	Conn     *grpc.ClientConn
-	Client   pb.LockServiceClient
-	ClientId int32
+	Conn          *grpc.ClientConn
+	Client        pb.LockServiceClient
+	ClientId      int32
+	StopHeartbeat func()
+}
+
+// RPC_start_heartbeat starts periodic heartbeats to the server
+func RPC_start_heartbeat(rpc *RpcConn) (func(), error) {
+	if rpc == nil {
+		return nil, fmt.Errorf("rpc connection is nil")
+	}
+
+	ticker := time.NewTicker(2 * time.Second)
+	stopCh := make(chan struct{})
+
+	go func() {
+		for {
+			select {
+			case <-ticker.C:
+				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+				_, err := rpc.Client.Heartbeat(ctx, &pb.Int{Rc: rpc.ClientId})
+				cancel()
+				if err != nil {
+					log.Printf("Failed to send heartbeat: %v", err)
+				}
+			case <-stopCh:
+				ticker.Stop()
+				return
+			}
+		}
+	}()
+
+	// Return function to stop heartbeat
+	return func() {
+		close(stopCh)
+	}, nil
 }
 
 // RPC_init initializes a connection to the server
@@ -44,11 +77,23 @@ func RPC_init(srcPort int, dstPort int, dstAddr string) (*RpcConn, error) {
 	clientId := resp.Rc
 	log.Printf("Connected to server with client ID: %d", clientId)
 
-	return &RpcConn{
+	rpcConn := &RpcConn{
 		Conn:     conn,
 		Client:   client,
 		ClientId: clientId,
-	}, nil
+	}
+
+	// Start heartbeat in background
+	stopHeartbeat, err := RPC_start_heartbeat(rpcConn)
+	if err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("failed to start heartbeat: %v", err)
+	}
+
+	// Store the stopHeartbeat function in the RpcConn
+	rpcConn.StopHeartbeat = stopHeartbeat
+
+	return rpcConn, nil
 }
 
 // RPC_acquire_lock sends a lock acquire request to the server
@@ -112,6 +157,7 @@ func RPC_append_file(rpc *RpcConn, fileName string, data string) error {
 		Content:  []byte(data),
 		ClientId: rpc.ClientId,
 	})
+	time.Sleep(time.Second * 5)
 	if err != nil {
 		return fmt.Errorf("failed to append to file: %v", err)
 	}
@@ -128,6 +174,10 @@ func RPC_append_file(rpc *RpcConn, fileName string, data string) error {
 func RPC_close(rpc *RpcConn) error {
 	if rpc == nil {
 		return fmt.Errorf("rpc connection is nil")
+	}
+
+	if rpc.StopHeartbeat != nil {
+		rpc.StopHeartbeat()
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
