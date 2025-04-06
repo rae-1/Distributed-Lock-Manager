@@ -2,3 +2,4 @@ go.mod
 go.sum
 lock
 server/data
+*.json
