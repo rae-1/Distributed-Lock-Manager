@@ -17,6 +17,7 @@ type RpcConn struct {
 	Client        pb.LockServiceClient
 	ClientId      int32
 	StopHeartbeat func()
+	SeqNum        int64
 }
 
 // RPC_start_heartbeat starts periodic heartbeats to the server
@@ -81,6 +82,7 @@ func RPC_init(srcPort int, dstPort int, dstAddr string) (*RpcConn, error) {
 		Conn:     conn,
 		Client:   client,
 		ClientId: clientId,
+		SeqNum:   0,
 	}
 
 	// Start heartbeat in background
@@ -102,11 +104,12 @@ func RPC_acquire_lock(rpc *RpcConn) error {
 		return fmt.Errorf("rpc connection is nil")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	log.Printf("Attempting to acquire lock")
 	resp, err := rpc.Client.LockAcquire(ctx, &pb.LockArgs{ClientId: rpc.ClientId})
+	log.Printf("resp: %v, error: %v", resp, err)
 	if err != nil {
 		return fmt.Errorf("failed to acquire lock: %v", err)
 	}
@@ -143,7 +146,7 @@ func RPC_release_lock(rpc *RpcConn) error {
 }
 
 // RPC_append_file sends a file append request to the server
-func RPC_append_file(rpc *RpcConn, fileName string, data string) error {
+func RPC_append_file(rpc *RpcConn, fileName string, data string, appendRetryCount uint8) error {
 	if rpc == nil {
 		return fmt.Errorf("rpc connection is nil")
 	}
@@ -156,6 +159,7 @@ func RPC_append_file(rpc *RpcConn, fileName string, data string) error {
 		Filename: fileName,
 		Content:  []byte(data),
 		ClientId: rpc.ClientId,
+		SeqNum:   rpc.SeqNum,
 	})
 	time.Sleep(time.Second * 5)
 	if err != nil {
@@ -166,6 +170,7 @@ func RPC_append_file(rpc *RpcConn, fileName string, data string) error {
 		return fmt.Errorf("file append failed with status: %v", resp.Status)
 	}
 
+	rpc.SeqNum++
 	log.Printf("File append successful")
 	return nil
 }

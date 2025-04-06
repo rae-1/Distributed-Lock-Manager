@@ -27,6 +27,7 @@ message file_args {
     string filename = 1;
     bytes content = 2;
     int32 client_id = 3;
+    int64 seq_num = 4;
 }
 
 // Simple integer container for client ID and return codes

@@ -17,15 +17,17 @@ import (
 
 type server struct {
 	pb.UnimplementedLockServiceServer
-	clientCounter  int32
-	fileLock       sync.Mutex          // Global lock for all files
-	waitQueue      []int32             // Client IDs waiting for the lock
-	queueMutex     sync.Mutex          // Mutex for the wait queue
-	lockHolder     int32               // Current lock holder
-	clientMutex    sync.Mutex          // Mutex for creating a new clientID
-	lastHeartbeat  map[int32]time.Time // Track last heartbeat time for each (active) client
-	heartbeatMutex sync.Mutex          // Mutex for the heartbeat map
-	// clients       map[int32]bool    // Active clients
+	clientCounter          int32
+	fileLock               sync.Mutex          // Global lock for all files
+	waitQueue              []int32             // Client IDs waiting for the lock
+	queueMutex             sync.Mutex          // Mutex for the wait queue
+	lockHolder             int32               // Current lock holder
+	clientMutex            sync.Mutex          // Mutex for creating a new clientID
+	lastHeartbeat          map[int32]time.Time // Track last heartbeat time for each (active) client
+	heartbeatMutex         sync.Mutex          // Mutex for the heartbeat map
+	processedRequests      map[int32]int64     // Track processed requests: clientID -> latest successfull write(seq_num)
+	processedRequestsMutex sync.Mutex          // Mutex for processed requests
+	// clients       map[int32]bool    		// Active clients
 }
 
 func createFiles() error {
@@ -68,6 +70,7 @@ func (s *server) ClientInit(ctx context.Context, in *pb.Int) (*pb.Int, error) {
 	return &pb.Int{Rc: clientID}, nil
 }
 
+// var counter int = 0
 func (s *server) LockAcquire(ctx context.Context, in *pb.LockArgs) (*pb.Response, error) {
 	clientID := in.ClientId
 	log.Printf("Lock acquire request from client %d", clientID)
@@ -79,6 +82,11 @@ func (s *server) LockAcquire(ctx context.Context, in *pb.LockArgs) (*pb.Response
 		s.lockHolder = clientID
 		s.queueMutex.Unlock()
 		log.Printf("Lock granted to client %d", clientID)
+		// simulating response drop
+		// if counter == 0 {
+		// 	counter++
+		// 	time.Sleep(6 * time.Second)
+		// }
 		return &pb.Response{Status: pb.Status_SUCCESS}, nil
 	}
 
@@ -155,8 +163,21 @@ func (s *server) FileAppend(ctx context.Context, in *pb.FileArgs) (*pb.Response,
 	clientID := in.ClientId
 	filename := in.Filename
 	content := in.Content
+	seq_num := in.SeqNum
 
 	log.Printf("File append request from client %d for file %s", clientID, filename)
+
+	s.processedRequestsMutex.Lock()
+	curSeqNum, exists := s.processedRequests[clientID]
+	if exists && curSeqNum >= seq_num {
+		s.processedRequestsMutex.Unlock()
+		log.Printf("Duplicate request from client %d for file %s", clientID, filename)
+		return &pb.Response{
+			Status:  pb.Status_SUCCESS,
+			Message: "Duplicate request",
+		}, nil
+	}
+	s.processedRequestsMutex.Unlock()
 
 	// Check if client holds the lock
 	s.queueMutex.Lock()
@@ -181,6 +202,11 @@ func (s *server) FileAppend(ctx context.Context, in *pb.FileArgs) (*pb.Response,
 		log.Printf("Failed to append to file %s: %v", filename, err)
 		return &pb.Response{Status: pb.Status_FILE_ERROR}, nil
 	}
+
+	// Mark this request as processed
+	s.processedRequestsMutex.Lock()
+	s.processedRequests[clientID] = seq_num
+	s.processedRequestsMutex.Unlock()
 
 	log.Printf("Successfully appended to file %s", filename)
 	return &pb.Response{Status: pb.Status_SUCCESS}, nil
@@ -242,7 +268,8 @@ func main() {
 		lockHolder:    0,
 		waitQueue:     make([]int32, 0),
 		// clients:       make(map[int32]bool),
-		lastHeartbeat: make(map[int32]time.Time),
+		lastHeartbeat:     make(map[int32]time.Time),
+		processedRequests: make(map[int32]int64),
 	}
 
 	// Starting heartbeat checker goroutine
