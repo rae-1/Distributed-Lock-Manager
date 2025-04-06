@@ -77,6 +77,16 @@ func (s *server) LockAcquire(ctx context.Context, in *pb.LockArgs) (*pb.Response
 
 	s.queueMutex.Lock()
 
+	// Check if client already holds the lock
+	if s.lockHolder == clientID {
+		s.queueMutex.Unlock()
+		log.Printf("Client %d already holds the lock", clientID)
+		return &pb.Response{
+			Status:  pb.Status_SUCCESS,
+			Message: "Already holds the lock",
+		}, nil
+	}
+
 	// If no one holds the lock, grant it immediately
 	if s.lockHolder == 0 {
 		s.lockHolder = clientID
@@ -141,7 +151,10 @@ func (s *server) LockRelease(ctx context.Context, in *pb.LockArgs) (*pb.Response
 	// Verify the client holds the lock
 	if s.lockHolder != clientID {
 		log.Printf("Client %d attempted to release a lock it doesn't hold", clientID)
-		return &pb.Response{Status: pb.Status_FILE_ERROR}, nil
+		return &pb.Response{
+			Status:  pb.Status_LOCK_ERROR,
+			Message: "lock either released or never acquired.",
+		}, nil
 	}
 
 	// Release the lock

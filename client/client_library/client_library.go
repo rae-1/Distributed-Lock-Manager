@@ -99,50 +99,94 @@ func RPC_init(srcPort int, dstPort int, dstAddr string) (*RpcConn, error) {
 }
 
 // RPC_acquire_lock sends a lock acquire request to the server
-func RPC_acquire_lock(rpc *RpcConn) error {
+func RPC_acquire_lock(rpc *RpcConn, acquireRetryCount uint8) error {
 	if rpc == nil {
 		return fmt.Errorf("rpc connection is nil")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	var lastErr error // Store the last error for logging if all attempts fail
 
-	log.Printf("Attempting to acquire lock")
-	resp, err := rpc.Client.LockAcquire(ctx, &pb.LockArgs{ClientId: rpc.ClientId})
-	log.Printf("resp: %v, error: %v", resp, err)
-	if err != nil {
-		return fmt.Errorf("failed to acquire lock: %v", err)
+	for attempt := uint8(1); attempt <= acquireRetryCount; attempt++ {
+		if attempt > 1 {
+			// Exponential backoff between retries (100ms, 200ms, 400ms, etc.)
+			backoffTime := time.Duration(100*(1<<(attempt-2))) * time.Millisecond
+			log.Printf("Retry attempt %d for lock acquisition after %v", attempt, backoffTime)
+			time.Sleep(backoffTime)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+
+		log.Printf("Attempting to acquire lock (attempt %d/%d)", attempt, acquireRetryCount)
+		resp, err := rpc.Client.LockAcquire(ctx, &pb.LockArgs{ClientId: rpc.ClientId})
+
+		if err != nil {
+			lastErr = fmt.Errorf("failed to acquire lock (attempt %d): %v", attempt, err)
+			log.Printf("%v", lastErr)
+			cancel()
+			continue // Try again
+		}
+
+		if resp.Status != pb.Status_SUCCESS {
+			lastErr = fmt.Errorf("lock acquisition failed with status: %v (attempt %d)", resp.Status, attempt)
+			log.Printf("%v", lastErr)
+			cancel()
+			continue // Try again
+		}
+
+		// Success - server message lost
+		if resp.Message != "" {
+			log.Printf("Lock acquisition message: %s", resp.Message)
+		}
+
+		log.Printf("Lock acquired successfully on attempt %d/%d", attempt, acquireRetryCount)
+		cancel()
+		return nil
 	}
 
-	if resp.Status != pb.Status_SUCCESS {
-		return fmt.Errorf("lock acquisition failed with status: %v", resp.Status)
-	}
-
-	log.Printf("Lock acquired successfully")
-	return nil
+	return fmt.Errorf("lock acquisition failed after %d attempts: %v", acquireRetryCount, lastErr)
 }
 
 // RPC_release_lock sends a lock release request to the server
-func RPC_release_lock(rpc *RpcConn) error {
+func RPC_release_lock(rpc *RpcConn, releaseRetryCount uint8) error {
 	if rpc == nil {
 		return fmt.Errorf("rpc connection is nil")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	var lastErr error // Store the last error for logging if all attempts fail
 
-	log.Printf("Releasing lock")
-	resp, err := rpc.Client.LockRelease(ctx, &pb.LockArgs{ClientId: rpc.ClientId})
-	if err != nil {
-		return fmt.Errorf("failed to release lock: %v", err)
+	// Initial attempt + retries
+	for attempt := uint8(1); attempt <= releaseRetryCount; attempt++ {
+		if attempt > 1 {
+			// Exponential backoff between retries (100ms, 200ms, 400ms, etc.)
+			backoffTime := time.Duration(100*(1<<(attempt-2))) * time.Millisecond
+			log.Printf("Retry attempt %d for lock release after %v", attempt, backoffTime)
+			time.Sleep(backoffTime)
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+
+		log.Printf("Releasing lock (attempt %d/%d)", attempt, releaseRetryCount)
+		resp, err := rpc.Client.LockRelease(ctx, &pb.LockArgs{ClientId: rpc.ClientId})
+
+		if err != nil {
+			lastErr = fmt.Errorf("failed to release lock (attempt %d): %v", attempt, err)
+			log.Printf("%v", lastErr)
+			cancel()
+			continue // Try again
+		}
+
+		if resp.Status != pb.Status_SUCCESS {
+			log.Printf("Lock release message: %s", resp.Message)
+			cancel()
+			return nil
+		}
+
+		log.Printf("Lock released successfully on attempt %d/%d", attempt, releaseRetryCount)
+		cancel()
+		return nil
 	}
 
-	if resp.Status != pb.Status_SUCCESS {
-		return fmt.Errorf("lock release failed with status: %v", resp.Status)
-	}
-
-	log.Printf("Lock released successfully")
-	return nil
+	// All attempts failed
+	return fmt.Errorf("lock release failed after %d attempts: %v", releaseRetryCount, lastErr)
 }
 
 // RPC_append_file sends a file append request to the server

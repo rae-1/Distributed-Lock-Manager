@@ -17,7 +17,8 @@ func main() {
 	defer client.RPC_close(rpc)
 
 	// Acquire the lock
-	err = client.RPC_acquire_lock(rpc)
+	var acquireRetryCount uint8 = 0
+	err = client.RPC_acquire_lock(rpc, acquireRetryCount)
 	if err != nil {
 		log.Fatalf("Failed to acquire lock: %v", err)
 	}
@@ -32,10 +33,9 @@ func main() {
 		log.Fatalf("Failed to append to file: %v", err)
 	}
 
-	// Add a small delay to simulate work
-
 	// Release the lock
-	err = client.RPC_release_lock(rpc)
+	var releaseRetryCount uint8 = 0
+	err = client.RPC_release_lock(rpc, releaseRetryCount)
 	if err != nil {
 		log.Fatalf("Failed to release lock: %v", err)
 	}
