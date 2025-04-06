@@ -17,15 +17,15 @@ func main() {
 	defer client.RPC_close(rpc)
 
 	// Acquire the lock
-	var acquireRetryCount uint8 = 0
+	var acquireRetryCount uint8 = 2
 	err = client.RPC_acquire_lock(rpc, acquireRetryCount)
 	if err != nil {
 		log.Fatalf("Failed to acquire lock: %v", err)
 	}
-	// time.Sleep(10 * time.Second)
+	time.Sleep(5 * time.Second)
 
 	// Append to a file
-	var appendRetryCount uint8 = 0
+	var appendRetryCount uint8 = 2
 	fileName := "file_0"
 	data := fmt.Sprintf("Data from client %d at %s\n", rpc.ClientId, time.Now().String())
 	err = client.RPC_append_file(rpc, fileName, data, appendRetryCount)
@@ -34,7 +34,7 @@ func main() {
 	}
 
 	// Release the lock
-	var releaseRetryCount uint8 = 0
+	var releaseRetryCount uint8 = 2
 	err = client.RPC_release_lock(rpc, releaseRetryCount)
 	if err != nil {
 		log.Fatalf("Failed to release lock: %v", err)

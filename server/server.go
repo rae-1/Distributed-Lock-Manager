@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"net"
 	"os"
@@ -30,7 +32,48 @@ type server struct {
 	heartbeatMutex         sync.Mutex          // Mutex for the heartbeat map
 	processedRequests      map[int32]int64     // Track processed requests: clientID -> latest successfull write(seq_num)
 	processedRequestsMutex sync.Mutex          // Mutex for processed requests
+	stateFile              string
 	// clients       map[int32]bool    		// Active clients
+}
+
+type serverState struct {
+	LockHolder        int32               `json:"lock_holder"`
+	WaitQueue         []int32             `json:"wait_queue"`
+	ProcessedRequests map[int32]int64     `json:"processed_requests"`
+	LastHeartbeat     map[int32]time.Time `json:"last_heartbeat"`
+	Epoch             int64               `json:"epoch"`
+}
+
+// save state periodically
+func (s *server) persistState() {
+	ticker := time.NewTicker(1 * time.Second)
+	for {
+		<-ticker.C
+		s.saveStateToDisk()
+	}
+}
+
+func (s *server) saveStateToDisk() {
+	s.queueMutex.Lock()
+	s.heartbeatMutex.Lock()
+	s.processedRequestsMutex.Lock()
+
+	state := serverState{
+		LockHolder:        s.lockHolder,
+		WaitQueue:         s.waitQueue,
+		ProcessedRequests: s.processedRequests,
+		LastHeartbeat:     s.lastHeartbeat,
+		Epoch:             time.Now().UnixNano(),
+	}
+
+	data, err := json.Marshal(state)
+	if err == nil {
+		ioutil.WriteFile(s.stateFile, data, 0644)
+	}
+
+	s.processedRequestsMutex.Unlock()
+	s.heartbeatMutex.Unlock()
+	s.queueMutex.Unlock()
 }
 
 func createFiles() error {
@@ -87,6 +130,18 @@ func (s *server) LockAcquire(ctx context.Context, in *pb.LockArgs) (*pb.Response
 			Status:  pb.Status_SUCCESS,
 			Message: "Already holds the lock",
 		}, nil
+	}
+
+	// Check if client is already in the wait queue
+	for _, id := range s.waitQueue {
+		if id == clientID {
+			s.queueMutex.Unlock()
+			log.Printf("Client %d is already in the wait queue", clientID)
+			return &pb.Response{
+				Status:  pb.Status_SUCCESS,
+				Message: "Already in wait queue",
+			}, nil
+		}
 	}
 
 	// If no one holds the lock, grant it immediately
@@ -211,7 +266,7 @@ func (s *server) FileAppend(ctx context.Context, in *pb.FileArgs) (*pb.Response,
 	if s.lockHolder != clientID {
 		s.queueMutex.Unlock()
 		log.Printf("Client %d attempted to append without holding the lock", clientID)
-		return &pb.Response{Status: pb.Status_FILE_ERROR}, nil
+		return &pb.Response{Status: pb.Status_LOCK_ERROR}, nil
 	}
 	s.queueMutex.Unlock()
 
@@ -298,7 +353,26 @@ func main() {
 		// clients:       make(map[int32]bool),
 		lastHeartbeat:     make(map[int32]time.Time),
 		processedRequests: make(map[int32]int64),
+		stateFile:         "lock_server_state.json",
 	}
+
+	// Attempt to recover state
+	if data, err := ioutil.ReadFile(lockServer.stateFile); err == nil {
+		var state serverState
+		if err := json.Unmarshal(data, &state); err == nil {
+			lockServer.lockHolder = state.LockHolder
+			lockServer.waitQueue = state.WaitQueue
+			lockServer.processedRequests = state.ProcessedRequests
+			lockServer.lastHeartbeat = make(map[int32]time.Time)
+			for clientID := range state.LastHeartbeat {
+				lockServer.lastHeartbeat[clientID] = time.Now()
+			}
+			log.Printf("Recovered server state from disk")
+		}
+	}
+
+	// Start persistence goroutine
+	go lockServer.persistState()
 
 	// Starting heartbeat checker goroutine
 	go lockServer.checkHeartbeats()

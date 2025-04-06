@@ -113,7 +113,7 @@ func RPC_acquire_lock(rpc *RpcConn, acquireRetryCount uint8) error {
 			log.Printf("Retry attempt %d for lock acquisition after %v", attempt, backoffTime)
 			time.Sleep(backoffTime)
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 
 		log.Printf("Attempting to acquire lock (attempt %d/%d)", attempt, acquireRetryCount)
 		resp, err := rpc.Client.LockAcquire(ctx, &pb.LockArgs{ClientId: rpc.ClientId})
@@ -226,6 +226,13 @@ func RPC_append_file(rpc *RpcConn, fileName string, data string, appendRetryCoun
 
 		// Check response status
 		if resp.Status != pb.Status_SUCCESS {
+			if resp.Status == pb.Status_LOCK_ERROR {
+				// Client doesn't hold the lock - exit immediately without retry
+				cancel()
+				return fmt.Errorf("cannot append file: client does not hold the lock")
+			}
+
+			// Other errors can be retried
 			lastErr = fmt.Errorf("file append failed with status: %v (attempt %d)", resp.Status, attempt)
 			log.Printf("%v", lastErr)
 			cancel()
