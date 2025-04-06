@@ -21,17 +21,18 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to acquire lock: %v", err)
 	}
+	// time.Sleep(10 * time.Second)
 
 	// Append to a file
+	var appendRetryCount uint8 = 0
 	fileName := "file_0"
 	data := fmt.Sprintf("Data from client %d at %s\n", rpc.ClientId, time.Now().String())
-	err = client.RPC_append_file(rpc, fileName, data)
+	err = client.RPC_append_file(rpc, fileName, data, appendRetryCount)
 	if err != nil {
 		log.Fatalf("Failed to append to file: %v", err)
 	}
 
 	// Add a small delay to simulate work
-	time.Sleep(2 * time.Second)
 
 	// Release the lock
 	err = client.RPC_release_lock(rpc)

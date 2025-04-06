@@ -151,28 +151,52 @@ func RPC_append_file(rpc *RpcConn, fileName string, data string, appendRetryCoun
 		return fmt.Errorf("rpc connection is nil")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	var lastErr error // Store the last error for logging if all attempts fail
 
-	log.Printf("Appending to file: %s", fileName)
-	resp, err := rpc.Client.FileAppend(ctx, &pb.FileArgs{
-		Filename: fileName,
-		Content:  []byte(data),
-		ClientId: rpc.ClientId,
-		SeqNum:   rpc.SeqNum,
-	})
-	time.Sleep(time.Second * 5)
-	if err != nil {
-		return fmt.Errorf("failed to append to file: %v", err)
+	// Retry mechanism for appending to the file
+	for attempt := uint8(1); attempt <= appendRetryCount; attempt++ {
+		if attempt > 1 {
+			// Backoff between retries (100ms, 200ms, 400ms, etc.)
+			backoffTime := time.Duration(100*(1<<(attempt-2))) * time.Millisecond
+			log.Printf("Retry attempt %d for file append after %v", attempt, backoffTime)
+			time.Sleep(backoffTime)
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+
+		log.Printf("Appending to file: %s (attempt %d/%d)", fileName, attempt, appendRetryCount)
+		resp, err := rpc.Client.FileAppend(ctx, &pb.FileArgs{
+			Filename: fileName,
+			Content:  []byte(data),
+			ClientId: rpc.ClientId,
+			SeqNum:   rpc.SeqNum,
+		})
+
+		// Store error for potential logging/returning if all attempts fail
+		if err != nil {
+			lastErr = fmt.Errorf("failed to append to file (attempt %d): %v", attempt, err)
+			log.Printf("%v", lastErr)
+			cancel()
+			continue // Try again
+		}
+
+		// Check response status
+		if resp.Status != pb.Status_SUCCESS {
+			lastErr = fmt.Errorf("file append failed with status: %v (attempt %d)", resp.Status, attempt)
+			log.Printf("%v", lastErr)
+			cancel()
+			continue // Try again
+		}
+
+		// Success - increment sequence number and return
+		rpc.SeqNum++
+		log.Printf("File append successful on attempt %d/%d", attempt, appendRetryCount)
+		cancel()
+		return nil
 	}
 
-	if resp.Status != pb.Status_SUCCESS {
-		return fmt.Errorf("file append failed with status: %v", resp.Status)
-	}
-
-	rpc.SeqNum++
-	log.Printf("File append successful")
-	return nil
+	// All attempts failed
+	return fmt.Errorf("file append failed after %d attempts: %v", appendRetryCount, lastErr)
 }
 
 // RPC_close cleans up the connection to the server
