@@ -22,6 +22,9 @@ type server struct {
 	waitQueue              []int32             // Client IDs waiting for the lock
 	queueMutex             sync.Mutex          // Mutex for the wait queue
 	lockHolder             int32               // Current lock holder
+	lockTimeout            int32               // Timeout for lock release
+	lockAcquireTime        time.Time           // When the current lock was acquired
+	lockTimerMutex         sync.Mutex          // Mutex for lock timer operations
 	clientMutex            sync.Mutex          // Mutex for creating a new clientID
 	lastHeartbeat          map[int32]time.Time // Track last heartbeat time for each (active) client
 	heartbeatMutex         sync.Mutex          // Mutex for the heartbeat map
@@ -70,7 +73,6 @@ func (s *server) ClientInit(ctx context.Context, in *pb.Int) (*pb.Int, error) {
 	return &pb.Int{Rc: clientID}, nil
 }
 
-// var counter int = 0
 func (s *server) LockAcquire(ctx context.Context, in *pb.LockArgs) (*pb.Response, error) {
 	clientID := in.ClientId
 	log.Printf("Lock acquire request from client %d", clientID)
@@ -90,13 +92,14 @@ func (s *server) LockAcquire(ctx context.Context, in *pb.LockArgs) (*pb.Response
 	// If no one holds the lock, grant it immediately
 	if s.lockHolder == 0 {
 		s.lockHolder = clientID
+
+		// Set lock acquisition time when granting the lock
+		s.lockTimerMutex.Lock()
+		s.lockAcquireTime = time.Now()
+		s.lockTimerMutex.Unlock()
+
 		s.queueMutex.Unlock()
 		log.Printf("Lock granted to client %d", clientID)
-		// simulating response drop
-		// if counter == 0 {
-		// 	counter++
-		// 	time.Sleep(6 * time.Second)
-		// }
 		return &pb.Response{Status: pb.Status_SUCCESS}, nil
 	}
 
@@ -112,6 +115,11 @@ func (s *server) LockAcquire(ctx context.Context, in *pb.LockArgs) (*pb.Response
 		s.queueMutex.Lock()
 		if s.lockHolder == clientID {
 			s.queueMutex.Unlock()
+
+			// s.lockTimerMutex.Lock()
+			// s.lockAcquireTime = time.Now()
+			// s.lockTimerMutex.Unlock()
+
 			log.Printf("Lock granted to client %d after waiting", clientID)
 			return &pb.Response{Status: pb.Status_SUCCESS}, nil
 		}
@@ -162,6 +170,12 @@ func (s *server) LockRelease(ctx context.Context, in *pb.LockArgs) (*pb.Response
 		// Grant lock to the next client in queue
 		s.lockHolder = s.waitQueue[0]
 		s.waitQueue = s.waitQueue[1:]
+
+		// Reset lock timer for new holder
+		s.lockTimerMutex.Lock()
+		s.lockAcquireTime = time.Now()
+		s.lockTimerMutex.Unlock()
+
 		log.Printf("Lock transferred to client %d", s.lockHolder)
 	} else {
 		// No one is waiting, mark lock as free
@@ -279,6 +293,7 @@ func main() {
 	lockServer := &server{
 		clientCounter: 0,
 		lockHolder:    0,
+		lockTimeout:   30,
 		waitQueue:     make([]int32, 0),
 		// clients:       make(map[int32]bool),
 		lastHeartbeat:     make(map[int32]time.Time),
@@ -287,6 +302,9 @@ func main() {
 
 	// Starting heartbeat checker goroutine
 	go lockServer.checkHeartbeats()
+
+	// Starting lock timeout checker goroutine
+	go lockServer.checkLockTimeout()
 
 	pb.RegisterLockServiceServer(s, lockServer)
 
@@ -343,5 +361,41 @@ func (s *server) checkHeartbeats() {
 
 		// s.clientMutex.Unlock()
 		s.heartbeatMutex.Unlock()
+	}
+}
+
+func (s *server) checkLockTimeout() {
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		<-ticker.C
+
+		s.queueMutex.Lock()
+		s.lockTimerMutex.Lock()
+
+		// Skip if no one holds the lock
+		if s.lockHolder != 0 {
+			// Check if the current lock has timed out
+			lockHeldFor := time.Since(s.lockAcquireTime)
+			if int32(lockHeldFor.Seconds()) > s.lockTimeout {
+				expiredClientID := s.lockHolder
+				log.Printf("Lock timeout: Client %d held the lock for more than %d seconds", expiredClientID, s.lockTimeout)
+
+				// Move to the next client in the queue
+				if len(s.waitQueue) > 0 {
+					s.lockHolder = s.waitQueue[0]
+					s.waitQueue = s.waitQueue[1:]
+					s.lockAcquireTime = time.Now() // Reset timer for new holder
+					log.Printf("Lock forcibly transferred to client %d after timeout", s.lockHolder)
+				} else {
+					s.lockHolder = 0
+					log.Printf("Lock forcibly released after timeout")
+				}
+			}
+		}
+
+		s.lockTimerMutex.Unlock()
+		s.queueMutex.Unlock()
 	}
 }
