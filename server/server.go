@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -46,7 +47,7 @@ type serverState struct {
 
 // save state periodically
 func (s *server) persistState() {
-	ticker := time.NewTicker(1 * time.Second)
+	ticker := time.NewTicker(2 * time.Second)
 	for {
 		<-ticker.C
 		s.saveStateToDisk()
@@ -116,6 +117,8 @@ func (s *server) ClientInit(ctx context.Context, in *pb.Int) (*pb.Int, error) {
 	return &pb.Int{Rc: clientID}, nil
 }
 
+var loss bool = false
+
 func (s *server) LockAcquire(ctx context.Context, in *pb.LockArgs) (*pb.Response, error) {
 	clientID := in.ClientId
 	log.Printf("Lock acquire request from client %d", clientID)
@@ -155,6 +158,14 @@ func (s *server) LockAcquire(ctx context.Context, in *pb.LockArgs) (*pb.Response
 
 		s.queueMutex.Unlock()
 		log.Printf("Lock granted to client %d", clientID)
+
+		// if loss {
+		// 	// Simulate a network loss scenario
+		// 	loss = false
+		// 	log.Printf("Simulating network loss for client %d", clientID)
+		// 	return nil, fmt.Errorf("simulated network loss")
+		// }
+
 		return &pb.Response{Status: pb.Status_SUCCESS}, nil
 	}
 
@@ -291,6 +302,16 @@ func (s *server) FileAppend(ctx context.Context, in *pb.FileArgs) (*pb.Response,
 	s.processedRequestsMutex.Unlock()
 
 	log.Printf("Successfully appended to file %s", filename)
+
+	// if loss {
+	// 	// Simulate a network loss scenario
+	// 	loss = false
+	// 	log.Printf("Simulating network loss for client %d", clientID)
+	// 	return nil, fmt.Errorf("simulated network loss")
+	// } else {
+	// 	loss = true
+	// }
+
 	return &pb.Response{Status: pb.Status_SUCCESS}, nil
 }
 
@@ -333,15 +354,28 @@ func (s *server) ClientClose(ctx context.Context, in *pb.Int) (*pb.Int, error) {
 }
 
 func main() {
+	// Define command-line flags
+	createFilesFlag := flag.Bool("create-files", true, "Create data files on startup")
+	loadStateFlag := flag.Bool("load-state", false, "Load server state from disk on startup")
+
+	// Parse the flags
+	flag.Parse()
+
 	port := 50051
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
 		log.Fatalf("Failed to listen: %v", err)
 	}
 
-	// Create 100 files
-	if err := createFiles(); err != nil {
-		log.Fatalf("Failed to create files: %v", err)
+	// Create files if flag is true
+	if *createFilesFlag {
+		// Create 100 files
+		if err := createFiles(); err != nil {
+			log.Fatalf("Failed to create files: %v", err)
+		}
+		log.Printf("Created data files")
+	} else {
+		log.Printf("Skipping file creation")
 	}
 
 	s := grpc.NewServer()
@@ -356,19 +390,27 @@ func main() {
 		stateFile:         "lock_server_state.json",
 	}
 
-	// Attempt to recover state
-	if data, err := ioutil.ReadFile(lockServer.stateFile); err == nil {
-		var state serverState
-		if err := json.Unmarshal(data, &state); err == nil {
-			lockServer.lockHolder = state.LockHolder
-			lockServer.waitQueue = state.WaitQueue
-			lockServer.processedRequests = state.ProcessedRequests
-			lockServer.lastHeartbeat = make(map[int32]time.Time)
-			for clientID := range state.LastHeartbeat {
-				lockServer.lastHeartbeat[clientID] = time.Now()
+	// Attempt to recover state if flag is true
+	if *loadStateFlag {
+		if data, err := ioutil.ReadFile(lockServer.stateFile); err == nil {
+			var state serverState
+			if err := json.Unmarshal(data, &state); err == nil {
+				lockServer.lockHolder = state.LockHolder
+				lockServer.waitQueue = state.WaitQueue
+				lockServer.processedRequests = state.ProcessedRequests
+				lockServer.lastHeartbeat = make(map[int32]time.Time)
+				for clientID := range state.LastHeartbeat {
+					lockServer.lastHeartbeat[clientID] = time.Now()
+				}
+				log.Printf("Recovered server state from disk")
+			} else {
+				log.Printf("Failed to parse state file: %v", err)
 			}
-			log.Printf("Recovered server state from disk")
+		} else {
+			log.Printf("No state file found or couldn't read it: %v", err)
 		}
+	} else {
+		log.Printf("Skipping state recovery")
 	}
 
 	// Start persistence goroutine
