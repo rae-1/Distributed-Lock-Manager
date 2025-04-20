@@ -17,14 +17,17 @@ func main() {
 	defer client.RPC_close(rpc)
 
 	// Loop interval
-	interval := 10 * time.Second
+	interval := 15 * time.Second
 
 	// Number of iterations
 	iterations := 2
 	count := 0
 
+	// flag := true
+
 	for {
 		log.Printf("Starting operation cycle %d", count+1)
+		count++
 
 		// Acquire the lock
 		var acquireRetryCount uint8 = 2
@@ -35,12 +38,12 @@ func main() {
 			time.Sleep(interval)
 			continue
 		}
-		time.Sleep(2 * time.Second)
+		time.Sleep(1 * time.Second)
 
 		// Append to a file
 		var appendRetryCount uint8 = 2
 		fileName := "file_0"
-		data := fmt.Sprintf("Data from client %d at %s (cycle %d)\n", rpc.ClientId, time.Now().String(), count+1)
+		data := fmt.Sprintf("Data from client A %d at %s (cycle %d)\n", rpc.ClientId, time.Now().String(), count)
 		err = client.RPC_append_file(rpc, fileName, data, appendRetryCount)
 		if err != nil {
 			log.Printf("Failed to append to file: %v", err)
@@ -53,8 +56,12 @@ func main() {
 			time.Sleep(interval)
 			continue
 		}
-		time.Sleep(6 * time.Second)
 
+		// if flag {
+		// 	fmt.Printf("Simulating lock release")
+		// 	flag = false
+		// 	time.Sleep(10 * time.Second)
+		// }
 		// Release the lock
 		var releaseRetryCount uint8 = 2
 		err = client.RPC_release_lock(rpc, releaseRetryCount)
@@ -65,9 +72,7 @@ func main() {
 			continue
 		}
 
-		fmt.Printf("Client operation cycle %d completed successfully\n", count+1)
-
-		count++
+		fmt.Printf("Client operation cycle %d completed successfully\n", count)
 
 		// Break after certain number of iterations (0 means run forever)
 		if iterations > 0 && count >= iterations {
@@ -75,9 +80,9 @@ func main() {
 		}
 
 		// Wait before next cycle
-		log.Printf("Waiting %v before next cycle", interval)
-		time.Sleep(interval)
+		log.Printf("Waiting 1s before next cycle")
+		time.Sleep(15 * time.Second)
 	}
 
-	fmt.Println("Client program completed")
+	fmt.Println("Client A program completed")
 }

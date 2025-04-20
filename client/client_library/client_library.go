@@ -13,13 +13,14 @@ import (
 )
 
 type RpcConn struct {
-	Conn          *grpc.ClientConn
-	Client        pb.LockServiceClient
-	ClientId      int32
-	StopHeartbeat func()
-	SeqNum        int64
+	Conn     *grpc.ClientConn
+	Client   pb.LockServiceClient
+	ClientId int32
+	// StopHeartbeat func()
+	SeqNum int64
 }
 
+/*
 // RPC_start_heartbeat starts periodic heartbeats to the server
 func RPC_start_heartbeat(rpc *RpcConn) (func(), error) {
 	if rpc == nil {
@@ -51,6 +52,7 @@ func RPC_start_heartbeat(rpc *RpcConn) (func(), error) {
 		close(stopCh)
 	}, nil
 }
+*/
 
 // RPC_init initializes a connection to the server
 func RPC_init(srcPort int, dstPort int, dstAddr string) (*RpcConn, error) {
@@ -85,15 +87,17 @@ func RPC_init(srcPort int, dstPort int, dstAddr string) (*RpcConn, error) {
 		SeqNum:   0,
 	}
 
-	// Start heartbeat in background
-	stopHeartbeat, err := RPC_start_heartbeat(rpcConn)
-	if err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("failed to start heartbeat: %v", err)
-	}
+	/*
+		// Start heartbeat in background
+		stopHeartbeat, err := RPC_start_heartbeat(rpcConn)
+		if err != nil {
+			conn.Close()
+			return nil, fmt.Errorf("failed to start heartbeat: %v", err)
+		}
 
-	// Store the stopHeartbeat function in the RpcConn
-	rpcConn.StopHeartbeat = stopHeartbeat
+		// Store the stopHeartbeat function in the RpcConn
+		rpcConn.StopHeartbeat = stopHeartbeat
+	*/
 
 	return rpcConn, nil
 }
@@ -112,8 +116,11 @@ func RPC_acquire_lock(rpc *RpcConn, acquireRetryCount uint8) error {
 			backoffTime := time.Duration(100*(1<<(attempt-2))) * time.Millisecond
 			log.Printf("Retry attempt %d for lock acquisition after %v", attempt, backoffTime)
 			time.Sleep(backoffTime)
+			// } else {
+			// 	log.Printf("Attempting to acquire lock (attempt %d/%d)", attempt, acquireRetryCount)
+			// 	continue
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 
 		log.Printf("Attempting to acquire lock (attempt %d/%d)", attempt, acquireRetryCount)
 		resp, err := rpc.Client.LockAcquire(ctx, &pb.LockArgs{ClientId: rpc.ClientId})
@@ -160,6 +167,10 @@ func RPC_release_lock(rpc *RpcConn, releaseRetryCount uint8) error {
 			backoffTime := time.Duration(100*(1<<(attempt-2))) * time.Millisecond
 			log.Printf("Retry attempt %d for lock release after %v", attempt, backoffTime)
 			time.Sleep(backoffTime)
+			// } else {
+			// 	time.Sleep(2000 * time.Millisecond)
+			// 	log.Printf("Attempting to release lock (attempt %d/%d)", attempt, releaseRetryCount)
+			// 	continue
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -206,7 +217,7 @@ func RPC_append_file(rpc *RpcConn, fileName string, data string, appendRetryCoun
 			time.Sleep(backoffTime)
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 
 		log.Printf("Appending to file: %s (attempt %d/%d)", fileName, attempt, appendRetryCount)
 		resp, err := rpc.Client.FileAppend(ctx, &pb.FileArgs{
@@ -256,9 +267,9 @@ func RPC_close(rpc *RpcConn) error {
 		return fmt.Errorf("rpc connection is nil")
 	}
 
-	if rpc.StopHeartbeat != nil {
-		rpc.StopHeartbeat()
-	}
+	// if rpc.StopHeartbeat != nil {
+	// 	rpc.StopHeartbeat()
+	// }
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

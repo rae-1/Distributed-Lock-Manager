@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -20,33 +21,33 @@ import (
 type server struct {
 	pb.UnimplementedLockServiceServer
 	clientCounter          int32
-	fileLock               sync.Mutex          // Global lock for all files
-	waitQueue              []int32             // Client IDs waiting for the lock
-	queueMutex             sync.Mutex          // Mutex for the wait queue
-	lockHolder             int32               // Current lock holder
-	lockTimeout            int32               // Timeout for lock release
-	lockAcquireTime        time.Time           // When the current lock was acquired
-	lockTimerMutex         sync.Mutex          // Mutex for lock timer operations
-	clientMutex            sync.Mutex          // Mutex for creating a new clientID
-	lastHeartbeat          map[int32]time.Time // Track last heartbeat time for each (active) client
-	heartbeatMutex         sync.Mutex          // Mutex for the heartbeat map
-	processedRequests      map[int32]int64     // Track processed requests: clientID -> latest successfull write(seq_num)
-	processedRequestsMutex sync.Mutex          // Mutex for processed requests
+	fileLock               sync.Mutex      // Global lock for all files
+	waitQueue              []int32         // Client IDs waiting for the lock
+	queueMutex             sync.Mutex      // Mutex for the wait queue
+	lockHolder             int32           // Current lock holder
+	lockTimeout            int32           // Timeout for lock release
+	lockAcquireTime        time.Time       // When the current lock was acquired
+	lockTimerMutex         sync.Mutex      // Mutex for lock timer operations
+	clientMutex            sync.Mutex      // Mutex for creating a new clientID
+	processedRequests      map[int32]int64 // Track processed requests: clientID -> latest successfull write(seq_num)
+	processedRequestsMutex sync.Mutex      // Mutex for processed requests
 	stateFile              string
+	// lastHeartbeat          map[int32]time.Time // Track last heartbeat time for each (active) client
+	// heartbeatMutex         sync.Mutex          // Mutex for the heartbeat map
 	// clients       map[int32]bool    		// Active clients
 }
 
 type serverState struct {
-	LockHolder        int32               `json:"lock_holder"`
-	WaitQueue         []int32             `json:"wait_queue"`
-	ProcessedRequests map[int32]int64     `json:"processed_requests"`
-	LastHeartbeat     map[int32]time.Time `json:"last_heartbeat"`
-	Epoch             int64               `json:"epoch"`
+	LockHolder        int32           `json:"lock_holder"`
+	WaitQueue         []int32         `json:"wait_queue"`
+	ProcessedRequests map[int32]int64 `json:"processed_requests"`
+	// LastHeartbeat     map[int32]time.Time `json:"last_heartbeat"`
+	Epoch int64 `json:"epoch"`
 }
 
 // save state periodically
 func (s *server) persistState() {
-	ticker := time.NewTicker(1 * time.Second)
+	ticker := time.NewTicker(2 * time.Second)
 	for {
 		<-ticker.C
 		s.saveStateToDisk()
@@ -55,15 +56,15 @@ func (s *server) persistState() {
 
 func (s *server) saveStateToDisk() {
 	s.queueMutex.Lock()
-	s.heartbeatMutex.Lock()
+	// s.heartbeatMutex.Lock()
 	s.processedRequestsMutex.Lock()
 
 	state := serverState{
 		LockHolder:        s.lockHolder,
 		WaitQueue:         s.waitQueue,
 		ProcessedRequests: s.processedRequests,
-		LastHeartbeat:     s.lastHeartbeat,
-		Epoch:             time.Now().UnixNano(),
+		// LastHeartbeat:     s.lastHeartbeat,
+		Epoch: time.Now().UnixNano(),
 	}
 
 	data, err := json.Marshal(state)
@@ -72,7 +73,7 @@ func (s *server) saveStateToDisk() {
 	}
 
 	s.processedRequestsMutex.Unlock()
-	s.heartbeatMutex.Unlock()
+	// s.heartbeatMutex.Unlock()
 	s.queueMutex.Unlock()
 }
 
@@ -95,6 +96,7 @@ func createFiles() error {
 	return nil
 }
 
+/*
 func (s *server) Heartbeat(ctx context.Context, in *pb.Int) (*pb.Response, error) {
 	clientID := in.Rc
 
@@ -104,6 +106,7 @@ func (s *server) Heartbeat(ctx context.Context, in *pb.Int) (*pb.Response, error
 
 	return &pb.Response{Status: pb.Status_SUCCESS}, nil
 }
+*/
 
 func (s *server) ClientInit(ctx context.Context, in *pb.Int) (*pb.Int, error) {
 	s.clientMutex.Lock()
@@ -115,6 +118,8 @@ func (s *server) ClientInit(ctx context.Context, in *pb.Int) (*pb.Int, error) {
 	log.Printf("Client initialized with ID: %d", clientID)
 	return &pb.Int{Rc: clientID}, nil
 }
+
+var loss bool = false
 
 func (s *server) LockAcquire(ctx context.Context, in *pb.LockArgs) (*pb.Response, error) {
 	clientID := in.ClientId
@@ -155,6 +160,14 @@ func (s *server) LockAcquire(ctx context.Context, in *pb.LockArgs) (*pb.Response
 
 		s.queueMutex.Unlock()
 		log.Printf("Lock granted to client %d", clientID)
+
+		// if loss {
+		// 	// Simulate a network loss scenario
+		// 	loss = false
+		// 	log.Printf("Simulating network loss for client %d", clientID)
+		// 	return nil, fmt.Errorf("simulated network loss")
+		// }
+
 		return &pb.Response{Status: pb.Status_SUCCESS}, nil
 	}
 
@@ -193,9 +206,9 @@ func (s *server) LockAcquire(ctx context.Context, in *pb.LockArgs) (*pb.Response
 			s.queueMutex.Unlock()
 
 			// Remove client from heartbeat-checking
-			s.heartbeatMutex.Lock()
-			delete(s.lastHeartbeat, clientID)
-			s.heartbeatMutex.Unlock()
+			// s.heartbeatMutex.Lock()
+			// delete(s.lastHeartbeat, clientID)
+			// s.heartbeatMutex.Unlock()
 
 			return nil, ctx.Err()
 		default:
@@ -291,6 +304,16 @@ func (s *server) FileAppend(ctx context.Context, in *pb.FileArgs) (*pb.Response,
 	s.processedRequestsMutex.Unlock()
 
 	log.Printf("Successfully appended to file %s", filename)
+
+	// if loss {
+	// 	// Simulate a network loss scenario
+	// 	loss = false
+	// 	log.Printf("Simulating network loss for client %d", clientID)
+	// 	return nil, fmt.Errorf("simulated network loss")
+	// } else {
+	// 	loss = true
+	// }
+
 	return &pb.Response{Status: pb.Status_SUCCESS}, nil
 }
 
@@ -303,9 +326,9 @@ func (s *server) ClientClose(ctx context.Context, in *pb.Int) (*pb.Int, error) {
 	// s.clientMutex.Unlock()
 
 	// Remove from heartbeat tracking
-	s.heartbeatMutex.Lock()
-	delete(s.lastHeartbeat, clientID)
-	s.heartbeatMutex.Unlock()
+	// s.heartbeatMutex.Lock()
+	// delete(s.lastHeartbeat, clientID)
+	// s.heartbeatMutex.Unlock()
 
 	// If the client held the lock, release it
 	s.queueMutex.Lock()
@@ -333,15 +356,28 @@ func (s *server) ClientClose(ctx context.Context, in *pb.Int) (*pb.Int, error) {
 }
 
 func main() {
+	// Define command-line flags
+	createFilesFlag := flag.Bool("create-files", true, "Create data files on startup")
+	loadStateFlag := flag.Bool("load-state", false, "Load server state from disk on startup")
+
+	// Parse the flags
+	flag.Parse()
+
 	port := 50051
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
 		log.Fatalf("Failed to listen: %v", err)
 	}
 
-	// Create 100 files
-	if err := createFiles(); err != nil {
-		log.Fatalf("Failed to create files: %v", err)
+	// Create files if flag is true
+	if *createFilesFlag {
+		// Create 100 files
+		if err := createFiles(); err != nil {
+			log.Fatalf("Failed to create files: %v", err)
+		}
+		log.Printf("Created data files")
+	} else {
+		log.Printf("Skipping file creation")
 	}
 
 	s := grpc.NewServer()
@@ -351,31 +387,39 @@ func main() {
 		lockTimeout:   30,
 		waitQueue:     make([]int32, 0),
 		// clients:       make(map[int32]bool),
-		lastHeartbeat:     make(map[int32]time.Time),
+		// lastHeartbeat:     make(map[int32]time.Time),
 		processedRequests: make(map[int32]int64),
 		stateFile:         "lock_server_state.json",
 	}
 
-	// Attempt to recover state
-	if data, err := ioutil.ReadFile(lockServer.stateFile); err == nil {
-		var state serverState
-		if err := json.Unmarshal(data, &state); err == nil {
-			lockServer.lockHolder = state.LockHolder
-			lockServer.waitQueue = state.WaitQueue
-			lockServer.processedRequests = state.ProcessedRequests
-			lockServer.lastHeartbeat = make(map[int32]time.Time)
-			for clientID := range state.LastHeartbeat {
-				lockServer.lastHeartbeat[clientID] = time.Now()
+	// Attempt to recover state if flag is true
+	if *loadStateFlag {
+		if data, err := ioutil.ReadFile(lockServer.stateFile); err == nil {
+			var state serverState
+			if err := json.Unmarshal(data, &state); err == nil {
+				lockServer.lockHolder = state.LockHolder
+				lockServer.waitQueue = state.WaitQueue
+				lockServer.processedRequests = state.ProcessedRequests
+				// lockServer.lastHeartbeat = make(map[int32]time.Time)
+				// for clientID := range state.LastHeartbeat {
+				// 	lockServer.lastHeartbeat[clientID] = time.Now()
+				// }
+				log.Printf("Recovered server state from disk")
+			} else {
+				log.Printf("Failed to parse state file: %v", err)
 			}
-			log.Printf("Recovered server state from disk")
+		} else {
+			log.Printf("No state file found or couldn't read it: %v", err)
 		}
+	} else {
+		log.Printf("Skipping state recovery")
 	}
 
 	// Start persistence goroutine
 	go lockServer.persistState()
 
 	// Starting heartbeat checker goroutine
-	go lockServer.checkHeartbeats()
+	// go lockServer.checkHeartbeats()
 
 	// Starting lock timeout checker goroutine
 	go lockServer.checkLockTimeout()
@@ -388,6 +432,7 @@ func main() {
 	}
 }
 
+/*
 func (s *server) checkHeartbeats() {
 	heartbeatTimeout := 5 * time.Second
 	ticker := time.NewTicker(1 * time.Second)
@@ -437,6 +482,7 @@ func (s *server) checkHeartbeats() {
 		s.heartbeatMutex.Unlock()
 	}
 }
+*/
 
 func (s *server) checkLockTimeout() {
 	ticker := time.NewTicker(1 * time.Second)
