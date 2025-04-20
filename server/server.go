@@ -20,20 +20,20 @@ import (
 
 type server struct {
 	pb.UnimplementedLockServiceServer
-	clientCounter   int32
-	fileLock        sync.Mutex // Global lock for all files
-	waitQueue       []int32    // Client IDs waiting for the lock
-	queueMutex      sync.Mutex // Mutex for the wait queue
-	lockHolder      int32      // Current lock holder
-	lockTimeout     int32      // Timeout for lock release
-	lockAcquireTime time.Time  // When the current lock was acquired
-	lockTimerMutex  sync.Mutex // Mutex for lock timer operations
-	clientMutex     sync.Mutex // Mutex for creating a new clientID
-	// lastHeartbeat          map[int32]time.Time // Track last heartbeat time for each (active) client
-	// heartbeatMutex         sync.Mutex          // Mutex for the heartbeat map
+	clientCounter          int32
+	fileLock               sync.Mutex      // Global lock for all files
+	waitQueue              []int32         // Client IDs waiting for the lock
+	queueMutex             sync.Mutex      // Mutex for the wait queue
+	lockHolder             int32           // Current lock holder
+	lockTimeout            int32           // Timeout for lock release
+	lockAcquireTime        time.Time       // When the current lock was acquired
+	lockTimerMutex         sync.Mutex      // Mutex for lock timer operations
+	clientMutex            sync.Mutex      // Mutex for creating a new clientID
 	processedRequests      map[int32]int64 // Track processed requests: clientID -> latest successfull write(seq_num)
 	processedRequestsMutex sync.Mutex      // Mutex for processed requests
 	stateFile              string
+	// lastHeartbeat          map[int32]time.Time // Track last heartbeat time for each (active) client
+	// heartbeatMutex         sync.Mutex          // Mutex for the heartbeat map
 	// clients       map[int32]bool    		// Active clients
 }
 
