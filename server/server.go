@@ -20,29 +20,29 @@ import (
 
 type server struct {
 	pb.UnimplementedLockServiceServer
-	clientCounter          int32
-	fileLock               sync.Mutex          // Global lock for all files
-	waitQueue              []int32             // Client IDs waiting for the lock
-	queueMutex             sync.Mutex          // Mutex for the wait queue
-	lockHolder             int32               // Current lock holder
-	lockTimeout            int32               // Timeout for lock release
-	lockAcquireTime        time.Time           // When the current lock was acquired
-	lockTimerMutex         sync.Mutex          // Mutex for lock timer operations
-	clientMutex            sync.Mutex          // Mutex for creating a new clientID
-	lastHeartbeat          map[int32]time.Time // Track last heartbeat time for each (active) client
-	heartbeatMutex         sync.Mutex          // Mutex for the heartbeat map
-	processedRequests      map[int32]int64     // Track processed requests: clientID -> latest successfull write(seq_num)
-	processedRequestsMutex sync.Mutex          // Mutex for processed requests
+	clientCounter   int32
+	fileLock        sync.Mutex // Global lock for all files
+	waitQueue       []int32    // Client IDs waiting for the lock
+	queueMutex      sync.Mutex // Mutex for the wait queue
+	lockHolder      int32      // Current lock holder
+	lockTimeout     int32      // Timeout for lock release
+	lockAcquireTime time.Time  // When the current lock was acquired
+	lockTimerMutex  sync.Mutex // Mutex for lock timer operations
+	clientMutex     sync.Mutex // Mutex for creating a new clientID
+	// lastHeartbeat          map[int32]time.Time // Track last heartbeat time for each (active) client
+	// heartbeatMutex         sync.Mutex          // Mutex for the heartbeat map
+	processedRequests      map[int32]int64 // Track processed requests: clientID -> latest successfull write(seq_num)
+	processedRequestsMutex sync.Mutex      // Mutex for processed requests
 	stateFile              string
 	// clients       map[int32]bool    		// Active clients
 }
 
 type serverState struct {
-	LockHolder        int32               `json:"lock_holder"`
-	WaitQueue         []int32             `json:"wait_queue"`
-	ProcessedRequests map[int32]int64     `json:"processed_requests"`
-	LastHeartbeat     map[int32]time.Time `json:"last_heartbeat"`
-	Epoch             int64               `json:"epoch"`
+	LockHolder        int32           `json:"lock_holder"`
+	WaitQueue         []int32         `json:"wait_queue"`
+	ProcessedRequests map[int32]int64 `json:"processed_requests"`
+	// LastHeartbeat     map[int32]time.Time `json:"last_heartbeat"`
+	Epoch int64 `json:"epoch"`
 }
 
 // save state periodically
@@ -56,15 +56,15 @@ func (s *server) persistState() {
 
 func (s *server) saveStateToDisk() {
 	s.queueMutex.Lock()
-	s.heartbeatMutex.Lock()
+	// s.heartbeatMutex.Lock()
 	s.processedRequestsMutex.Lock()
 
 	state := serverState{
 		LockHolder:        s.lockHolder,
 		WaitQueue:         s.waitQueue,
 		ProcessedRequests: s.processedRequests,
-		LastHeartbeat:     s.lastHeartbeat,
-		Epoch:             time.Now().UnixNano(),
+		// LastHeartbeat:     s.lastHeartbeat,
+		Epoch: time.Now().UnixNano(),
 	}
 
 	data, err := json.Marshal(state)
@@ -73,7 +73,7 @@ func (s *server) saveStateToDisk() {
 	}
 
 	s.processedRequestsMutex.Unlock()
-	s.heartbeatMutex.Unlock()
+	// s.heartbeatMutex.Unlock()
 	s.queueMutex.Unlock()
 }
 
@@ -96,6 +96,7 @@ func createFiles() error {
 	return nil
 }
 
+/*
 func (s *server) Heartbeat(ctx context.Context, in *pb.Int) (*pb.Response, error) {
 	clientID := in.Rc
 
@@ -105,6 +106,7 @@ func (s *server) Heartbeat(ctx context.Context, in *pb.Int) (*pb.Response, error
 
 	return &pb.Response{Status: pb.Status_SUCCESS}, nil
 }
+*/
 
 func (s *server) ClientInit(ctx context.Context, in *pb.Int) (*pb.Int, error) {
 	s.clientMutex.Lock()
@@ -204,9 +206,9 @@ func (s *server) LockAcquire(ctx context.Context, in *pb.LockArgs) (*pb.Response
 			s.queueMutex.Unlock()
 
 			// Remove client from heartbeat-checking
-			s.heartbeatMutex.Lock()
-			delete(s.lastHeartbeat, clientID)
-			s.heartbeatMutex.Unlock()
+			// s.heartbeatMutex.Lock()
+			// delete(s.lastHeartbeat, clientID)
+			// s.heartbeatMutex.Unlock()
 
 			return nil, ctx.Err()
 		default:
@@ -324,9 +326,9 @@ func (s *server) ClientClose(ctx context.Context, in *pb.Int) (*pb.Int, error) {
 	// s.clientMutex.Unlock()
 
 	// Remove from heartbeat tracking
-	s.heartbeatMutex.Lock()
-	delete(s.lastHeartbeat, clientID)
-	s.heartbeatMutex.Unlock()
+	// s.heartbeatMutex.Lock()
+	// delete(s.lastHeartbeat, clientID)
+	// s.heartbeatMutex.Unlock()
 
 	// If the client held the lock, release it
 	s.queueMutex.Lock()
@@ -385,7 +387,7 @@ func main() {
 		lockTimeout:   30,
 		waitQueue:     make([]int32, 0),
 		// clients:       make(map[int32]bool),
-		lastHeartbeat:     make(map[int32]time.Time),
+		// lastHeartbeat:     make(map[int32]time.Time),
 		processedRequests: make(map[int32]int64),
 		stateFile:         "lock_server_state.json",
 	}
@@ -398,10 +400,10 @@ func main() {
 				lockServer.lockHolder = state.LockHolder
 				lockServer.waitQueue = state.WaitQueue
 				lockServer.processedRequests = state.ProcessedRequests
-				lockServer.lastHeartbeat = make(map[int32]time.Time)
-				for clientID := range state.LastHeartbeat {
-					lockServer.lastHeartbeat[clientID] = time.Now()
-				}
+				// lockServer.lastHeartbeat = make(map[int32]time.Time)
+				// for clientID := range state.LastHeartbeat {
+				// 	lockServer.lastHeartbeat[clientID] = time.Now()
+				// }
 				log.Printf("Recovered server state from disk")
 			} else {
 				log.Printf("Failed to parse state file: %v", err)
@@ -417,7 +419,7 @@ func main() {
 	go lockServer.persistState()
 
 	// Starting heartbeat checker goroutine
-	go lockServer.checkHeartbeats()
+	// go lockServer.checkHeartbeats()
 
 	// Starting lock timeout checker goroutine
 	go lockServer.checkLockTimeout()
@@ -430,6 +432,7 @@ func main() {
 	}
 }
 
+/*
 func (s *server) checkHeartbeats() {
 	heartbeatTimeout := 5 * time.Second
 	ticker := time.NewTicker(1 * time.Second)
@@ -479,6 +482,7 @@ func (s *server) checkHeartbeats() {
 		s.heartbeatMutex.Unlock()
 	}
 }
+*/
 
 func (s *server) checkLockTimeout() {
 	ticker := time.NewTicker(1 * time.Second)

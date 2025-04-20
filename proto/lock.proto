@@ -53,5 +53,5 @@ service LockService {
     rpc client_close(Int) returns (Int);
 
     // Client heartbeat to indicate it's still active
-    rpc heartbeat(Int) returns (Response);
+    // rpc heartbeat(Int) returns (Response);
 }

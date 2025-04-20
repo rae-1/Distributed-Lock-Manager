@@ -13,13 +13,14 @@ import (
 )
 
 type RpcConn struct {
-	Conn          *grpc.ClientConn
-	Client        pb.LockServiceClient
-	ClientId      int32
-	StopHeartbeat func()
-	SeqNum        int64
+	Conn     *grpc.ClientConn
+	Client   pb.LockServiceClient
+	ClientId int32
+	// StopHeartbeat func()
+	SeqNum int64
 }
 
+/*
 // RPC_start_heartbeat starts periodic heartbeats to the server
 func RPC_start_heartbeat(rpc *RpcConn) (func(), error) {
 	if rpc == nil {
@@ -51,6 +52,7 @@ func RPC_start_heartbeat(rpc *RpcConn) (func(), error) {
 		close(stopCh)
 	}, nil
 }
+*/
 
 // RPC_init initializes a connection to the server
 func RPC_init(srcPort int, dstPort int, dstAddr string) (*RpcConn, error) {
@@ -85,15 +87,17 @@ func RPC_init(srcPort int, dstPort int, dstAddr string) (*RpcConn, error) {
 		SeqNum:   0,
 	}
 
-	// Start heartbeat in background
-	stopHeartbeat, err := RPC_start_heartbeat(rpcConn)
-	if err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("failed to start heartbeat: %v", err)
-	}
+	/*
+		// Start heartbeat in background
+		stopHeartbeat, err := RPC_start_heartbeat(rpcConn)
+		if err != nil {
+			conn.Close()
+			return nil, fmt.Errorf("failed to start heartbeat: %v", err)
+		}
 
-	// Store the stopHeartbeat function in the RpcConn
-	rpcConn.StopHeartbeat = stopHeartbeat
+		// Store the stopHeartbeat function in the RpcConn
+		rpcConn.StopHeartbeat = stopHeartbeat
+	*/
 
 	return rpcConn, nil
 }
@@ -263,9 +267,9 @@ func RPC_close(rpc *RpcConn) error {
 		return fmt.Errorf("rpc connection is nil")
 	}
 
-	if rpc.StopHeartbeat != nil {
-		rpc.StopHeartbeat()
-	}
+	// if rpc.StopHeartbeat != nil {
+	// 	rpc.StopHeartbeat()
+	// }
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
