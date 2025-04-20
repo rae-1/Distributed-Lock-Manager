@@ -112,8 +112,11 @@ func RPC_acquire_lock(rpc *RpcConn, acquireRetryCount uint8) error {
 			backoffTime := time.Duration(100*(1<<(attempt-2))) * time.Millisecond
 			log.Printf("Retry attempt %d for lock acquisition after %v", attempt, backoffTime)
 			time.Sleep(backoffTime)
+			// } else {
+			// 	log.Printf("Attempting to acquire lock (attempt %d/%d)", attempt, acquireRetryCount)
+			// 	continue
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 
 		log.Printf("Attempting to acquire lock (attempt %d/%d)", attempt, acquireRetryCount)
 		resp, err := rpc.Client.LockAcquire(ctx, &pb.LockArgs{ClientId: rpc.ClientId})
@@ -160,6 +163,10 @@ func RPC_release_lock(rpc *RpcConn, releaseRetryCount uint8) error {
 			backoffTime := time.Duration(100*(1<<(attempt-2))) * time.Millisecond
 			log.Printf("Retry attempt %d for lock release after %v", attempt, backoffTime)
 			time.Sleep(backoffTime)
+			// } else {
+			// 	time.Sleep(2000 * time.Millisecond)
+			// 	log.Printf("Attempting to release lock (attempt %d/%d)", attempt, releaseRetryCount)
+			// 	continue
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -206,7 +213,7 @@ func RPC_append_file(rpc *RpcConn, fileName string, data string, appendRetryCoun
 			time.Sleep(backoffTime)
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 
 		log.Printf("Appending to file: %s (attempt %d/%d)", fileName, attempt, appendRetryCount)
 		resp, err := rpc.Client.FileAppend(ctx, &pb.FileArgs{
