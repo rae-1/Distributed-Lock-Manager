@@ -11,15 +11,23 @@ message lock_args {
 
 // Server return status codes
 enum Status {
-    SUCCESS = 0;      // Operation succeeded
-    FILE_ERROR = 1;   // File not found or other file-related error
-    LOCK_ERROR = 2;   // Lock could not be acquired or released
+    SUCCESS = 0;           // Operation succeeded
+    FILE_ERROR = 1;        // File not found or other file-related error
+    LOCK_ERROR = 2;        // Lock could not be acquired or released
+    REDIRECT = 3;          // Client should contact the leader
+}
+
+// Leader information for redirects
+message LeaderInfo {
+    string leader_address = 1;
+    int32 leader_id = 2;
 }
 
 // Response struct returned by server
 message Response {
     Status status = 1;
-    string message = 2;  // Optional message for more detailed responses
+    string message = 2;           // Optional message for more detailed responses
+    LeaderInfo leader_info = 3;   // Leader information for redirects
 }
 
 // File append arguments
@@ -33,6 +41,43 @@ message file_args {
 // Simple integer container for client ID and return codes
 message Int {
     int32 rc = 1;
+}
+
+// Log entry for consensus replication
+message LogEntry {
+    int64 term = 1;                // Term when entry was created
+    int64 log_number = 2;          // Sequence number within the term
+    string operation = 3;          // "client_init", "lock_acquire", "lock_release", "file_append", "client_close"
+    int32 client_id = 4;           // Client ID for the operation
+    int64 seq_num = 5;             // For file_append operations
+}
+
+// Response to log replication
+message LogResponse {
+    int64 term = 1;               // Current term, for leader to update itself
+    bool success = 2;             // True if follower accepted the entry
+    LeaderInfo leader_info = 3;   // In case follower knows of higher-term leader
+}
+
+// Request vote during leader election
+message VoteRequest {
+    int64 term = 1;               // Candidate's term
+    int32 candidate_id = 2;       // Candidate requesting vote
+    int64 last_log_index = 3;     // Index of candidate's last log entry
+    int64 last_log_term = 4;      // Term of candidate's last log entry
+}
+
+// Response to vote request
+message VoteResponse {
+    int64 term = 1;               // Current term, for candidate to update itself
+    bool vote_granted = 2;        // True means candidate received vote
+}
+
+// Rollback request for failed consensus
+message RollbackRequest {
+    int64 term = 1;               // Current term
+    string operation = 2;         // Operation to roll back
+    int32 client_id = 3;          // Client ID involved
 }
 
 // The lock service definition
@@ -52,6 +97,11 @@ service LockService {
     // Client terminates connection with server
     rpc client_close(Int) returns (Int);
 
-    // Client heartbeat to indicate it's still active
-    // rpc heartbeat(Int) returns (Response);
+    // Consensus RPCs
+    rpc replicate_log(LogEntry) returns (LogResponse);
+    rpc request_vote(VoteRequest) returns (VoteResponse);
+    rpc rollback(RollbackRequest) returns (Response);
+    
+    // Leader discovery
+    rpc get_leader(Int) returns (LeaderInfo);
 }
