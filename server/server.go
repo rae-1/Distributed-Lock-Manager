@@ -40,6 +40,16 @@ type server struct {
 	currentTerm      int64      // Current election term
 	currentLogNumber int64      // Current log number
 	termMutex        sync.Mutex // Mutex for term/log number updates
+
+	// Election-related fields
+	serverState       string         // "follower", "candidate", or "leader"
+	stateMutex        sync.Mutex     // Protects state changes
+	electionTimer     *time.Timer    // Timer for election timeout
+	electionTimeout   time.Duration  // Current election timeout duration
+	votedFor          int32          // Server ID that received vote in current term
+	votes             map[int32]bool // Votes received in current election
+	votesMutex        sync.Mutex     // Protects vote counting
+	heartbeatInterval time.Duration  // Interval between heartbeats (leader only)
 }
 
 type serverState struct {
@@ -49,9 +59,10 @@ type serverState struct {
 	Epoch             int64           `json:"epoch"`
 
 	// Consensus state
-	CurrentTerm      int64 `json:"current_term"`
-	CurrentLogNumber int64 `json:"current_log_number"`
-	LeaderIndex      int   `json:"leader_index"`
+	CurrentTerm      int64  `json:"current_term"`
+	CurrentLogNumber int64  `json:"current_log_number"`
+	LeaderIndex      int    `json:"leader_index"`
+	ServerState      string `json:"server_state"` // "follower", "candidate", or "leader"
 }
 
 // save state periodically
@@ -75,6 +86,7 @@ func (s *server) saveStateToDisk() {
 		CurrentTerm:       s.currentTerm,
 		CurrentLogNumber:  s.currentLogNumber,
 		LeaderIndex:       s.leaderIndex,
+		ServerState:       s.serverState,
 		// Epoch:             time.Now().UnixNano(),
 	}
 
@@ -606,6 +618,19 @@ func main() {
 	// Start background tasks
 	go lockServer.persistState()
 	go lockServer.checkLockTimeout()
+
+	// Initialize election with the correct starting state
+	lockServer.InitializeElection()
+
+	// If this is server 0, make it the initial leader
+	if serverId == 0 && *createFilesFlag {
+		log.Printf("Server %d: Initializing with create files flag: %v", serverId, *createFilesFlag)
+		lockServer.serverState = LEADER
+		// time.Sleep(time.Duration(10) * time.Second)
+		log.Printf("sending beats")
+		// Start sending heartbeats immediately
+		// go lockServer.sendHeartbeats()
+	}
 
 	// Register with gRPC
 	s := grpc.NewServer()

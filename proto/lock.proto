@@ -66,6 +66,7 @@ message VoteRequest {
     int32 candidate_id = 2;       // Candidate requesting vote
     int64 last_log_index = 3;     // Index of candidate's last log entry
     int64 last_log_term = 4;      // Term of candidate's last log entry
+    int64 processed_request_sum = 5;   // Sum of all sequence numbers in processedRequests
 }
 
 // Response to vote request
@@ -79,6 +80,19 @@ message RollbackRequest {
     int64 term = 1;               // Current term
     string operation = 2;         // Operation to roll back
     int32 client_id = 3;          // Client ID involved
+}
+
+// Heartbeat message from leader to followers
+message HeartbeatRequest {
+    int64 term = 1;                           // Leader's term
+    int32 leader_id = 2;                     // Leader's ID
+    map<int32, int64> processed_requests = 3; // Client ID -> highest sequence number
+}
+
+message HeartbeatResponse {
+    int64 term = 1;               // Current term, for leader to update itself
+    bool success = 2;             // True if follower accepts the heartbeat
+    LeaderInfo leader_info = 3;   // In case follower knows of higher-term leader
 }
 
 // The lock service definition
@@ -105,4 +119,7 @@ service LockService {
     
     // Leader discovery
     rpc get_leader(Int) returns (LeaderInfo);
+
+    // Heartbeat from leader to followers
+    rpc heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
 }
