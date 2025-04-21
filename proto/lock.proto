@@ -50,6 +50,7 @@ message LogEntry {
     string operation = 3;          // "client_init", "lock_acquire", "lock_release", "file_append", "client_close"
     int32 client_id = 4;           // Client ID for the operation
     int64 seq_num = 5;             // For file_append operations
+    int32 leader_id = 6;           // To identify the leader
 }
 
 // Response to log replication

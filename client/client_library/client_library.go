@@ -8,6 +8,7 @@ import (
 
 	pb "lock-service/lock"
 
+	"golang.org/x/net/context"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -18,47 +19,70 @@ type RpcConn struct {
 	ClientId int32
 	// StopHeartbeat func()
 	SeqNum int64
+
+	leaderIdx int
 }
 
-/*
-// RPC_start_heartbeat starts periodic heartbeats to the server
-func RPC_start_heartbeat(rpc *RpcConn) (func(), error) {
-	if rpc == nil {
-		return nil, fmt.Errorf("rpc connection is nil")
+var defaultServerList = []string{
+	"localhost:50051", // server 0 (initial leader)
+	"localhost:50052", // server 1
+	"localhost:50053", // server 2
+	"localhost:50054", // server 3
+	"localhost:50055", // server 4
+}
+
+// helper function to check if the error message says to redirect
+func isRedirectError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return contains(msg, "contact")
+}
+
+func extractLeaderAddr(errMsg string) string {
+	const contactStr = "contact"
+	idx := -1
+	for i := 0; i <= len(errMsg)-len(contactStr); i++ {
+		if errMsg[i:i+len(contactStr)] == contactStr {
+			idx = i + len(contactStr)
+			break
+		}
 	}
 
-	ticker := time.NewTicker(2 * time.Second)
-	stopCh := make(chan struct{})
-
-	go func() {
-		for {
-			select {
-			case <-ticker.C:
-				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-				_, err := rpc.Client.Heartbeat(ctx, &pb.Int{Rc: rpc.ClientId})
-				cancel()
-				if err != nil {
-					log.Printf("Failed to send heartbeat: %v", err)
-				}
-			case <-stopCh:
-				ticker.Stop()
-				return
-			}
-		}
-	}()
-
-	// Return function to stop heartbeat
-	return func() {
-		close(stopCh)
-	}, nil
+	if idx >= 0 {
+		return errMsg[idx:]
+	}
+	return ""
 }
-*/
+
+func tryNextServer(serverAddr string) (string, error) {
+	for _, addr := range defaultServerList {
+		conn, err := grpc.Dial(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			continue
+		}
+		client := pb.NewLockServiceClient(conn)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+
+		resp, err := client.GetLeader(ctx, &pb.Int{Rc: 0})
+		if err != nil || resp.LeaderIndex == -1 {
+			conn.Close()
+			continue
+		}
+
+		return resp.LeaderAddress, nil
+	}
+	return "", fmt.Errorf("Leader not found")
+}
 
 // RPC_init initializes a connection to the server
 func RPC_init(srcPort int, dstPort int, dstAddr string) (*RpcConn, error) {
 	serverAddr := fmt.Sprintf("%s:%d", dstAddr, dstPort)
 
-	// Set up a connection to the server
+	// Set up a connection to the server with the given address
 	conn, err := grpc.Dial(serverAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to server: %v", err)
@@ -70,22 +94,51 @@ func RPC_init(srcPort int, dstPort int, dstAddr string) (*RpcConn, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// Send empty request to get client ID
+	// Send empty request to get client ID or to know which server is the leader
 	resp, err := client.ClientInit(ctx, &pb.Int{Rc: 0})
 	if err != nil {
 		conn.Close()
+		if isRedirectError(err) {
+			// Extract the new leader address from the error message and establish a new connection
+			leaderAddr := extractLeaderAddr(err.Error())
+			// if
+			if leaderAddr == "" {
+				leaderAddr, err = tryNextServer(serverAddr)
+				if err != nil {
+					return nil, fmt.Errorf("failed to locate leader: %v", err)
+				}
+			}
+			conn, err = grpc.Dial(leaderAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+			if err != nil {
+				return nil, fmt.Errorf("failed to connect to new leader: %v", err)
+			}
+
+			client = pb.NewLockServiceClient(conn)
+
+			// Retry the initialization with the new connection
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			resp, err = client.ClientInit(ctx, &pb.Int{Rc: 0})
+			if err != nil {
+				return nil, fmt.Errorf("failed to connect to new leader: %v", err)
+			}
+		} else {
+			return nil, fmt.Errorf("failed to initialize client: %v", err)
+		}
+	} else {
 		return nil, fmt.Errorf("failed to initialize client: %v", err)
 	}
 
-	clientId := resp.Rc
-	log.Printf("Connected to server with client ID: %d", clientId)
-
 	rpcConn := &RpcConn{
-		Conn:     conn,
-		Client:   client,
-		ClientId: clientId,
-		SeqNum:   0,
+		Conn:      conn,
+		Client:    pb.NewLockServiceClient(conn),
+		ClientId:  resp.Rc,
+		leaderIdx: 0,
+		SeqNum:    0,
 	}
+
+	log.Printf("Connected to server with client ID: %d", resp.Rc)
 
 	/*
 		// Start heartbeat in background
@@ -100,6 +153,25 @@ func RPC_init(srcPort int, dstPort int, dstAddr string) (*RpcConn, error) {
 	*/
 
 	return rpcConn, nil
+}
+
+// Handle server redirect
+func handleRedirect(rpc *RpcConn, leaderInfo *pb.LeaderInfo) error {
+	if rpc.Conn != nil {
+		rpc.Conn.Close()
+	}
+
+	newConn, err := grpc.Dial(leaderInfo.LeaderAddress, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return fmt.Errorf("failed to connect to leader %s: %v", leaderInfo.LeaderAddress, err)
+	}
+
+	// Update connection
+	rpc.Conn = newConn
+	rpc.Client = pb.NewLockServiceClient(newConn)
+	log.Printf("Redirected to leader %s", leaderInfo.LeaderAddress)
+
+	return nil
 }
 
 // RPC_acquire_lock sends a lock acquire request to the server
@@ -132,7 +204,18 @@ func RPC_acquire_lock(rpc *RpcConn, acquireRetryCount uint8) error {
 			continue // Try again
 		}
 
-		if resp.Status != pb.Status_SUCCESS {
+		// Handle redirect if we are not talking to the leader
+		if resp.Status == pb.Status_REDIRECT {
+			log.Printf("Redirected: %s", resp.Message)
+			cancel()
+			if err := handleRedirect(rpc, resp.LeaderInfo); err != nil {
+				log.Printf("Redirect failed: %v", err)
+				continue
+			}
+			continue //Try again with new leader
+		}
+
+		if resp.Status == pb.Status_LOCK_ERROR {
 			lastErr = fmt.Errorf("lock acquisition failed with status: %v (attempt %d)", resp.Status, attempt)
 			log.Printf("%v", lastErr)
 			cancel()
@@ -185,6 +268,15 @@ func RPC_release_lock(rpc *RpcConn, releaseRetryCount uint8) error {
 			continue // Try again
 		}
 
+		if resp.Status == pb.Status_REDIRECT {
+			log.Printf("Redirected: %s", resp.Message)
+			if err := handleRedirect(rpc, resp.LeaderInfo); err != nil {
+				log.Printf("Redirect failed: %v", err)
+				continue
+			}
+			continue // Try again with new leader
+		}
+
 		if resp.Status != pb.Status_SUCCESS {
 			log.Printf("Lock release message: %s", resp.Message)
 			cancel()
@@ -233,6 +325,15 @@ func RPC_append_file(rpc *RpcConn, fileName string, data string, appendRetryCoun
 			log.Printf("%v", lastErr)
 			cancel()
 			continue // Try again
+		}
+
+		if resp.Status == pb.Status_REDIRECT {
+			log.Printf("Redirected: %s", resp.Message)
+			if err := handleRedirect(rpc, resp.LeaderInfo); err != nil {
+				log.Printf("Redirect failed: %v", err)
+				continue
+			}
+			continue // Try again with new leader
 		}
 
 		// Check response status
