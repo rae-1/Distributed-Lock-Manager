@@ -259,6 +259,8 @@ func (s *server) LockAcquire(ctx context.Context, in *pb.LockArgs) (*pb.Response
 				}, nil
 			}
 
+			s.lockHolder = clientID
+
 			log.Printf("Lock granted to client %d", clientID)
 			return &pb.Response{Status: pb.Status_SUCCESS}, nil
 		}
