@@ -23,9 +23,9 @@ const (
 
 // Constants for timeouts (milliseconds)
 const (
-	MIN_ELECTION_TIMEOUT  = 2500
-	MAX_ELECTION_TIMEOUT  = 15000
-	HEARTBEAT_INTERVAL    = 700
+	MIN_ELECTION_TIMEOUT  = 12500
+	MAX_ELECTION_TIMEOUT  = 25000
+	HEARTBEAT_INTERVAL    = 1000
 	VOTE_RESPONSE_TIMEOUT = 500
 	RPC_TIMEOUT           = 500
 )
@@ -51,7 +51,7 @@ func (s *server) runElectionMonitor() {
 		switch state {
 		case FOLLOWER:
 			// In follower state, wait for the election timer to expire
-			log.Printf("Server %d: Waiting for election timer to expire...", s.serverId)
+			// log.Printf("Server %d: Waiting for election timer to expire...", s.serverId)
 
 			// Capture current timer to avoid racing with resetElectionTimer
 			s.lockTimerMutex.Lock()
@@ -87,7 +87,7 @@ func (s *server) runElectionMonitor() {
 				}
 			case <-timerResetCh:
 				// Timer was reset (due to heartbeat), restart the loop
-				log.Printf("Server %d: Timer was reset, restarting monitor", s.serverId)
+				// log.Printf("Server %d: Timer was reset, restarting monitor", s.serverId)
 				continue
 			}
 
@@ -132,7 +132,7 @@ func (s *server) runElectionMonitor() {
 				}
 			case <-timerResetCh:
 				// Timer was reset (due to becoming follower or leader), restart the loop
-				log.Printf("Server %d: Timer was reset during candidacy, restarting monitor", s.serverId)
+				// log.Printf("Server %d: Timer was reset during candidacy, restarting monitor", s.serverId)
 				continue
 			}
 
@@ -158,7 +158,7 @@ func (s *server) resetElectionTimer() {
 	s.electionTimeout = time.Duration(timeout) * time.Millisecond
 	s.timerGeneration++ // Increment the generation counter
 	s.electionTimer = time.NewTimer(s.electionTimeout)
-	log.Printf("Server %d: Reset election timer to %v", s.serverId, s.electionTimeout)
+	// log.Printf("Server %d: Reset election timer to %v", s.serverId, s.electionTimeout)
 }
 
 // Start a new election
@@ -240,7 +240,6 @@ func (s *server) startElection() {
 			// Send vote request
 			response, err := s.requestVoteRPC(ctx, serverAddr, voteRequest)
 			if err != nil {
-				log.Printf("sending beats3")
 				log.Printf("Server %d: Failed to get vote from server %d: %v",
 					s.serverId, serverIndex, err)
 				return
@@ -394,8 +393,8 @@ func (s *server) Heartbeat(ctx context.Context, req *pb.HeartbeatRequest) (*pb.H
 	s.termMutex.Lock()
 	defer s.termMutex.Unlock()
 
-	log.Printf("Server %d: Received heartbeat from leader %d (term %d, current term: %d)",
-		s.serverId, req.LeaderId, req.Term, s.currentTerm)
+	// log.Printf("Server %d: Received heartbeat from leader %d (term %d, current term: %d)",
+	// s.serverId, req.LeaderId, req.Term, s.currentTerm)
 
 	response := &pb.HeartbeatResponse{
 		Term:    s.currentTerm,
@@ -404,8 +403,8 @@ func (s *server) Heartbeat(ctx context.Context, req *pb.HeartbeatRequest) (*pb.H
 
 	// If heartbeat term is smaller than our term, reject it
 	if req.Term < s.currentTerm {
-		log.Printf("Server %d: Rejecting heartbeat from %d - lower term",
-			s.serverId, req.LeaderId)
+		// log.Printf("Server %d: Rejecting heartbeat from %d - lower term",
+		// s.serverId, req.LeaderId)
 		return response, nil
 	}
 
@@ -435,7 +434,7 @@ func (s *server) Heartbeat(ctx context.Context, req *pb.HeartbeatRequest) (*pb.H
 		}
 
 		response.Success = true
-		log.Printf("Server %d: Accepted heartbeat from leader %d", s.serverId, req.LeaderId)
+		// log.Printf("Server %d: Accepted heartbeat from leader %d", s.serverId, req.LeaderId)
 	}
 
 	return response, nil
@@ -484,8 +483,8 @@ func (s *server) sendHeartbeats() {
 			// Send heartbeat
 			response, err := s.heartbeatRPC(ctx, serverAddr, heartbeatRequest)
 			if err != nil {
-				log.Printf("Server %d: Failed to send heartbeat to server %d: %v",
-					s.serverId, serverIndex, err)
+				// log.Printf("Server %d: Failed to send heartbeat to server %d: %v",
+				// 	s.serverId, serverIndex, err)
 				return
 			}
 
@@ -574,7 +573,6 @@ func (s *server) requestVoteRPC(ctx context.Context, serverAddr string, req *pb.
 	// Establish connection
 	conn, err := s.getServerConnection(serverAddr)
 	if err != nil {
-		log.Printf("sending beats2")
 		return nil, err
 	}
 
@@ -599,7 +597,6 @@ func (s *server) heartbeatRPC(ctx context.Context, serverAddr string, req *pb.He
 func (s *server) getServerConnection(serverAddr string) (*grpc.ClientConn, error) {
 	conn, err := grpc.Dial(serverAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
-		log.Printf("sending beats")
 		return nil, fmt.Errorf("failed to connect to server %s: %v", serverAddr, err)
 	}
 	return conn, nil
