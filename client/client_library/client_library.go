@@ -16,46 +16,29 @@ type RpcConn struct {
 	Conn     *grpc.ClientConn
 	Client   pb.LockServiceClient
 	ClientId int32
-	// StopHeartbeat func()
-	SeqNum int64
+	SeqNum   int64
+
+	// Added server list and current leader tracking
+	serverList  []string
+	leaderIndex int
 }
 
-/*
-// RPC_start_heartbeat starts periodic heartbeats to the server
-func RPC_start_heartbeat(rpc *RpcConn) (func(), error) {
-	if rpc == nil {
-		return nil, fmt.Errorf("rpc connection is nil")
-	}
-
-	ticker := time.NewTicker(2 * time.Second)
-	stopCh := make(chan struct{})
-
-	go func() {
-		for {
-			select {
-			case <-ticker.C:
-				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-				_, err := rpc.Client.Heartbeat(ctx, &pb.Int{Rc: rpc.ClientId})
-				cancel()
-				if err != nil {
-					log.Printf("Failed to send heartbeat: %v", err)
-				}
-			case <-stopCh:
-				ticker.Stop()
-				return
-			}
-		}
-	}()
-
-	// Return function to stop heartbeat
-	return func() {
-		close(stopCh)
-	}, nil
+// Default server list
+var defaultServerList = []string{
+	"localhost:50051", // Server 0 (initial leader)
+	"localhost:50052", // Server 1
+	"localhost:50053", // Server 2
+	"localhost:50054", // Server 3
+	"localhost:50055", // Server 4
 }
-*/
 
 // RPC_init initializes a connection to the server
 func RPC_init(srcPort int, dstPort int, dstAddr string) (*RpcConn, error) {
+	// Use specified address or default to localhost
+	if dstAddr == "" {
+		dstAddr = "localhost"
+	}
+
 	serverAddr := fmt.Sprintf("%s:%d", dstAddr, dstPort)
 
 	// Set up a connection to the server
@@ -80,24 +63,15 @@ func RPC_init(srcPort int, dstPort int, dstAddr string) (*RpcConn, error) {
 	clientId := resp.Rc
 	log.Printf("Connected to server with client ID: %d", clientId)
 
+	// Create RPC connection with server list and default leader
 	rpcConn := &RpcConn{
-		Conn:     conn,
-		Client:   client,
-		ClientId: clientId,
-		SeqNum:   0,
+		Conn:        conn,
+		Client:      client,
+		ClientId:    clientId,
+		SeqNum:      0,
+		serverList:  defaultServerList,
+		leaderIndex: 0, // Assume server 0 is leader by default
 	}
-
-	/*
-		// Start heartbeat in background
-		stopHeartbeat, err := RPC_start_heartbeat(rpcConn)
-		if err != nil {
-			conn.Close()
-			return nil, fmt.Errorf("failed to start heartbeat: %v", err)
-		}
-
-		// Store the stopHeartbeat function in the RpcConn
-		rpcConn.StopHeartbeat = stopHeartbeat
-	*/
 
 	return rpcConn, nil
 }
@@ -108,20 +82,16 @@ func RPC_acquire_lock(rpc *RpcConn, acquireRetryCount uint8) error {
 		return fmt.Errorf("rpc connection is nil")
 	}
 
-	var lastErr error // Store the last error for logging if all attempts fail
+	var lastErr error
 
 	for attempt := uint8(1); attempt <= acquireRetryCount; attempt++ {
 		if attempt > 1 {
-			// Exponential backoff between retries (100ms, 200ms, 400ms, etc.)
 			backoffTime := time.Duration(100*(1<<(attempt-2))) * time.Millisecond
 			log.Printf("Retry attempt %d for lock acquisition after %v", attempt, backoffTime)
 			time.Sleep(backoffTime)
-			// } else {
-			// 	log.Printf("Attempting to acquire lock (attempt %d/%d)", attempt, acquireRetryCount)
-			// 	continue
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 
+		ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 		log.Printf("Attempting to acquire lock (attempt %d/%d)", attempt, acquireRetryCount)
 		resp, err := rpc.Client.LockAcquire(ctx, &pb.LockArgs{ClientId: rpc.ClientId})
 
@@ -129,17 +99,22 @@ func RPC_acquire_lock(rpc *RpcConn, acquireRetryCount uint8) error {
 			lastErr = fmt.Errorf("failed to acquire lock (attempt %d): %v", attempt, err)
 			log.Printf("%v", lastErr)
 			cancel()
-			continue // Try again
+			continue
 		}
 
-		if resp.Status != pb.Status_SUCCESS {
+		// Handle response status - now checking for REDIRECT status too
+		if resp.Status == pb.Status_REDIRECT {
+			log.Printf("Received redirect response: %s", resp.Message)
+			// Just log for now - we'll handle leader changes in future updates
+			cancel()
+			continue
+		} else if resp.Status != pb.Status_SUCCESS {
 			lastErr = fmt.Errorf("lock acquisition failed with status: %v (attempt %d)", resp.Status, attempt)
 			log.Printf("%v", lastErr)
 			cancel()
-			continue // Try again
+			continue
 		}
 
-		// Success - server message lost
 		if resp.Message != "" {
 			log.Printf("Lock acquisition message: %s", resp.Message)
 		}
@@ -158,23 +133,16 @@ func RPC_release_lock(rpc *RpcConn, releaseRetryCount uint8) error {
 		return fmt.Errorf("rpc connection is nil")
 	}
 
-	var lastErr error // Store the last error for logging if all attempts fail
+	var lastErr error
 
-	// Initial attempt + retries
 	for attempt := uint8(1); attempt <= releaseRetryCount; attempt++ {
 		if attempt > 1 {
-			// Exponential backoff between retries (100ms, 200ms, 400ms, etc.)
 			backoffTime := time.Duration(100*(1<<(attempt-2))) * time.Millisecond
 			log.Printf("Retry attempt %d for lock release after %v", attempt, backoffTime)
 			time.Sleep(backoffTime)
-			// } else {
-			// 	time.Sleep(2000 * time.Millisecond)
-			// 	log.Printf("Attempting to release lock (attempt %d/%d)", attempt, releaseRetryCount)
-			// 	continue
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-
 		log.Printf("Releasing lock (attempt %d/%d)", attempt, releaseRetryCount)
 		resp, err := rpc.Client.LockRelease(ctx, &pb.LockArgs{ClientId: rpc.ClientId})
 
@@ -182,13 +150,28 @@ func RPC_release_lock(rpc *RpcConn, releaseRetryCount uint8) error {
 			lastErr = fmt.Errorf("failed to release lock (attempt %d): %v", attempt, err)
 			log.Printf("%v", lastErr)
 			cancel()
-			continue // Try again
+			continue
 		}
 
-		if resp.Status != pb.Status_SUCCESS {
-			log.Printf("Lock release message: %s", resp.Message)
+		// Handle response status - now checking for REDIRECT status too
+		if resp.Status == pb.Status_REDIRECT {
+			log.Printf("Received redirect response: %s", resp.Message)
+			// Just log for now - we'll handle leader changes in future updates
 			cancel()
-			return nil
+			continue
+		} else if resp.Status != pb.Status_SUCCESS {
+			// Special case - if lock was already released, that's OK
+			if resp.Status == pb.Status_LOCK_ERROR &&
+				resp.Message == "lock either released or never acquired." {
+				log.Printf("Lock already released or never acquired")
+				cancel()
+				return nil
+			}
+
+			lastErr = fmt.Errorf("lock release failed with status: %v (attempt %d)", resp.Status, attempt)
+			log.Printf("%v", lastErr)
+			cancel()
+			continue
 		}
 
 		log.Printf("Lock released successfully on attempt %d/%d", attempt, releaseRetryCount)
@@ -196,7 +179,6 @@ func RPC_release_lock(rpc *RpcConn, releaseRetryCount uint8) error {
 		return nil
 	}
 
-	// All attempts failed
 	return fmt.Errorf("lock release failed after %d attempts: %v", releaseRetryCount, lastErr)
 }
 
@@ -206,19 +188,16 @@ func RPC_append_file(rpc *RpcConn, fileName string, data string, appendRetryCoun
 		return fmt.Errorf("rpc connection is nil")
 	}
 
-	var lastErr error // Store the last error for logging if all attempts fail
+	var lastErr error
 
-	// Retry mechanism for appending to the file
 	for attempt := uint8(1); attempt <= appendRetryCount; attempt++ {
 		if attempt > 1 {
-			// Backoff between retries (100ms, 200ms, 400ms, etc.)
 			backoffTime := time.Duration(100*(1<<(attempt-2))) * time.Millisecond
 			log.Printf("Retry attempt %d for file append after %v", attempt, backoffTime)
 			time.Sleep(backoffTime)
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-
 		log.Printf("Appending to file: %s (attempt %d/%d)", fileName, attempt, appendRetryCount)
 		resp, err := rpc.Client.FileAppend(ctx, &pb.FileArgs{
 			Filename: fileName,
@@ -227,27 +206,28 @@ func RPC_append_file(rpc *RpcConn, fileName string, data string, appendRetryCoun
 			SeqNum:   rpc.SeqNum,
 		})
 
-		// Store error for potential logging/returning if all attempts fail
 		if err != nil {
 			lastErr = fmt.Errorf("failed to append to file (attempt %d): %v", attempt, err)
 			log.Printf("%v", lastErr)
 			cancel()
-			continue // Try again
+			continue
 		}
 
-		// Check response status
-		if resp.Status != pb.Status_SUCCESS {
-			if resp.Status == pb.Status_LOCK_ERROR {
-				// Client doesn't hold the lock - exit immediately without retry
-				cancel()
-				return fmt.Errorf("cannot append file: client does not hold the lock")
-			}
-
-			// Other errors can be retried
+		// Handle response status - now checking for REDIRECT status too
+		if resp.Status == pb.Status_REDIRECT {
+			log.Printf("Received redirect response: %s", resp.Message)
+			// Just log for now - we'll handle leader changes in future updates
+			cancel()
+			continue
+		} else if resp.Status == pb.Status_LOCK_ERROR {
+			// Client doesn't hold the lock - exit immediately without retry
+			cancel()
+			return fmt.Errorf("cannot append file: client does not hold the lock")
+		} else if resp.Status != pb.Status_SUCCESS {
 			lastErr = fmt.Errorf("file append failed with status: %v (attempt %d)", resp.Status, attempt)
 			log.Printf("%v", lastErr)
 			cancel()
-			continue // Try again
+			continue
 		}
 
 		// Success - increment sequence number and return
@@ -257,7 +237,6 @@ func RPC_append_file(rpc *RpcConn, fileName string, data string, appendRetryCoun
 		return nil
 	}
 
-	// All attempts failed
 	return fmt.Errorf("file append failed after %d attempts: %v", appendRetryCount, lastErr)
 }
 
@@ -267,18 +246,14 @@ func RPC_close(rpc *RpcConn) error {
 		return fmt.Errorf("rpc connection is nil")
 	}
 
-	// if rpc.StopHeartbeat != nil {
-	// 	rpc.StopHeartbeat()
-	// }
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	log.Printf("Closing connection with server")
 	_, err := rpc.Client.ClientClose(ctx, &pb.Int{Rc: rpc.ClientId})
 	if err != nil {
-		rpc.Conn.Close()
-		return fmt.Errorf("failed to close connection: %v", err)
+		log.Printf("Error during client_close: %v", err)
+		// Continue to close the connection anyway
 	}
 
 	err = rpc.Conn.Close()

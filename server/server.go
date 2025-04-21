@@ -29,20 +29,41 @@ type server struct {
 	lockAcquireTime        time.Time       // When the current lock was acquired
 	lockTimerMutex         sync.Mutex      // Mutex for lock timer operations
 	clientMutex            sync.Mutex      // Mutex for creating a new clientID
-	processedRequests      map[int32]int64 // Track processed requests: clientID -> latest successfull write(seq_num)
+	processedRequests      map[int32]int64 // Track processed requests: clientID -> latest successful write(seq_num)
 	processedRequestsMutex sync.Mutex      // Mutex for processed requests
 	stateFile              string
-	// lastHeartbeat          map[int32]time.Time // Track last heartbeat time for each (active) client
-	// heartbeatMutex         sync.Mutex          // Mutex for the heartbeat map
-	// clients       map[int32]bool    		// Active clients
+
+	// Consensus-related fields
+	serverId         int32      // This server's ID
+	serverList       []string   // List of all server addresses
+	leaderIndex      int        // Index of the current leader (-1 if unknown)
+	currentTerm      int64      // Current election term
+	currentLogNumber int64      // Current log number
+	termMutex        sync.Mutex // Mutex for term/log number updates
+
+	// Election-related fields
+	serverState       string         // "follower", "candidate", or "leader"
+	stateMutex        sync.Mutex     // Protects state changes
+	electionTimer     *time.Timer    // Timer for election timeout
+	electionTimeout   time.Duration  // Current election timeout duration
+	votedFor          int32          // Server ID that received vote in current term
+	votes             map[int32]bool // Votes received in current election
+	votesMutex        sync.Mutex     // Protects vote counting
+	heartbeatInterval time.Duration  // Interval between heartbeats (leader only)
+	timerGeneration   int64          // Generation number for the current election timer
 }
 
 type serverState struct {
 	LockHolder        int32           `json:"lock_holder"`
 	WaitQueue         []int32         `json:"wait_queue"`
 	ProcessedRequests map[int32]int64 `json:"processed_requests"`
-	// LastHeartbeat     map[int32]time.Time `json:"last_heartbeat"`
-	Epoch int64 `json:"epoch"`
+	Epoch             int64           `json:"epoch"`
+
+	// Consensus state
+	CurrentTerm      int64  `json:"current_term"`
+	CurrentLogNumber int64  `json:"current_log_number"`
+	LeaderIndex      int    `json:"leader_index"`
+	ServerState      string `json:"server_state"` // "follower", "candidate", or "leader"
 }
 
 // save state periodically
@@ -56,15 +77,18 @@ func (s *server) persistState() {
 
 func (s *server) saveStateToDisk() {
 	s.queueMutex.Lock()
-	// s.heartbeatMutex.Lock()
 	s.processedRequestsMutex.Lock()
+	s.termMutex.Lock()
 
 	state := serverState{
 		LockHolder:        s.lockHolder,
 		WaitQueue:         s.waitQueue,
 		ProcessedRequests: s.processedRequests,
-		// LastHeartbeat:     s.lastHeartbeat,
-		Epoch: time.Now().UnixNano(),
+		CurrentTerm:       s.currentTerm,
+		CurrentLogNumber:  s.currentLogNumber,
+		LeaderIndex:       s.leaderIndex,
+		ServerState:       s.serverState,
+		// Epoch:             time.Now().UnixNano(),
 	}
 
 	data, err := json.Marshal(state)
@@ -72,8 +96,8 @@ func (s *server) saveStateToDisk() {
 		ioutil.WriteFile(s.stateFile, data, 0644)
 	}
 
+	s.termMutex.Unlock()
 	s.processedRequestsMutex.Unlock()
-	// s.heartbeatMutex.Unlock()
 	s.queueMutex.Unlock()
 }
 
@@ -96,34 +120,65 @@ func createFiles() error {
 	return nil
 }
 
-/*
-func (s *server) Heartbeat(ctx context.Context, in *pb.Int) (*pb.Response, error) {
-	clientID := in.Rc
-
-	s.heartbeatMutex.Lock()
-	s.lastHeartbeat[clientID] = time.Now()
-	s.heartbeatMutex.Unlock()
-
-	return &pb.Response{Status: pb.Status_SUCCESS}, nil
-}
-*/
-
 func (s *server) ClientInit(ctx context.Context, in *pb.Int) (*pb.Int, error) {
+	// Check if we are the leader
+	if s.leaderIndex != int(s.serverId) {
+		log.Printf("Non-leader server %d redirecting client_init request", s.serverId)
+		return &pb.Int{Rc: -1}, fmt.Errorf("not leader, contact %s", s.serverList[s.leaderIndex])
+	}
+
+	// Generate client ID as before
 	s.clientMutex.Lock()
 	s.clientCounter++
 	clientID := s.clientCounter
-	// s.clients[clientID] = true
 	s.clientMutex.Unlock()
+
+	// Try to replicate to other servers
+	_, positiveServers, err := s.ReplicateAndGetConsensus("client_init", clientID, 0)
+
+	if err != nil {
+		log.Printf("Failed to replicate client_init: %v", err)
+
+		// Check if we're still the leader after replication attempt
+		if s.leaderIndex != int(s.serverId) {
+			// We're no longer the leader - redirect client
+			log.Printf("Server %d is no longer the leader", s.serverId)
+			return &pb.Int{Rc: -1}, fmt.Errorf("leadership changed, contact %s",
+				s.serverList[s.leaderIndex])
+		}
+
+		// Rollback client counter and notify positive servers
+		s.clientMutex.Lock()
+		s.clientCounter--
+		s.clientMutex.Unlock()
+
+		if len(positiveServers) > 0 {
+			s.RollbackOperation(s.currentTerm, "client_init", clientID, positiveServers)
+		}
+
+		return nil, fmt.Errorf("failed to initialize client: %v", err)
+	}
 
 	log.Printf("Client initialized with ID: %d", clientID)
 	return &pb.Int{Rc: clientID}, nil
 }
 
-var loss bool = false
-
 func (s *server) LockAcquire(ctx context.Context, in *pb.LockArgs) (*pb.Response, error) {
 	clientID := in.ClientId
 	log.Printf("Lock acquire request from client %d", clientID)
+
+	// Check if we are the leader
+	if s.leaderIndex != int(s.serverId) {
+		log.Printf("Non-leader server %d redirecting lock_acquire request", s.serverId)
+		return &pb.Response{
+			Status:  pb.Status_REDIRECT,
+			Message: "Not the leader server",
+			LeaderInfo: &pb.LeaderInfo{
+				LeaderId:      int32(s.leaderIndex),
+				LeaderAddress: s.serverList[s.leaderIndex],
+			},
+		}, nil
+	}
 
 	s.queueMutex.Lock()
 
@@ -137,41 +192,47 @@ func (s *server) LockAcquire(ctx context.Context, in *pb.LockArgs) (*pb.Response
 		}, nil
 	}
 
-	// Check if client is already in the wait queue
-	for _, id := range s.waitQueue {
-		if id == clientID {
-			s.queueMutex.Unlock()
-			log.Printf("Client %d is already in the wait queue", clientID)
+	// If no one holds the lock, grant it immediately through consensus
+	if s.lockHolder == 0 {
+		// Release mutex during consensus to avoid blocking
+		s.queueMutex.Unlock()
+
+		// Get consensus from other servers
+		_, positiveServers, err := s.ReplicateAndGetConsensus("lock_acquire", clientID, 0)
+
+		if err != nil {
+			log.Printf("Failed to replicate lock_acquire: %v", err)
+
+			// Check if we're still the leader
+			if s.leaderIndex != int(s.serverId) {
+				return &pb.Response{
+					Status:  pb.Status_REDIRECT,
+					Message: "Leadership changed during operation",
+					LeaderInfo: &pb.LeaderInfo{
+						LeaderId:      int32(s.leaderIndex),
+						LeaderAddress: s.serverList[s.leaderIndex],
+					},
+				}, nil
+			}
+
+			// Initiate rollback if any servers approved
+			if len(positiveServers) > 0 {
+				s.RollbackOperation(s.currentTerm, "lock_acquire", clientID, positiveServers)
+			}
+
 			return &pb.Response{
-				Status:  pb.Status_SUCCESS,
-				Message: "Already in wait queue",
+				Status:  pb.Status_LOCK_ERROR,
+				Message: fmt.Sprintf("Failed to acquire lock: %v", err),
 			}, nil
 		}
-	}
 
-	// If no one holds the lock, grant it immediately
-	if s.lockHolder == 0 {
 		s.lockHolder = clientID
 
-		// Set lock acquisition time when granting the lock
-		s.lockTimerMutex.Lock()
-		s.lockAcquireTime = time.Now()
-		s.lockTimerMutex.Unlock()
-
-		s.queueMutex.Unlock()
 		log.Printf("Lock granted to client %d", clientID)
-
-		// if loss {
-		// 	// Simulate a network loss scenario
-		// 	loss = false
-		// 	log.Printf("Simulating network loss for client %d", clientID)
-		// 	return nil, fmt.Errorf("simulated network loss")
-		// }
-
 		return &pb.Response{Status: pb.Status_SUCCESS}, nil
 	}
 
-	// Add client to wait queue
+	// Add client to wait queue (no consensus needed for queue management)
 	s.waitQueue = append(s.waitQueue, clientID)
 	clientWaitIndex := len(s.waitQueue) - 1
 	s.queueMutex.Unlock()
@@ -184,11 +245,38 @@ func (s *server) LockAcquire(ctx context.Context, in *pb.LockArgs) (*pb.Response
 		if s.lockHolder == clientID {
 			s.queueMutex.Unlock()
 
-			// s.lockTimerMutex.Lock()
-			// s.lockAcquireTime = time.Now()
-			// s.lockTimerMutex.Unlock()
+			// Get consensus from other servers
+			_, positiveServers, err := s.ReplicateAndGetConsensus("lock_acquire", clientID, 0)
 
-			log.Printf("Lock granted to client %d after waiting", clientID)
+			if err != nil {
+				log.Printf("Failed to replicate lock_acquire: %v", err)
+
+				// Check if we're still the leader
+				if s.leaderIndex != int(s.serverId) {
+					return &pb.Response{
+						Status:  pb.Status_REDIRECT,
+						Message: "Leadership changed during operation",
+						LeaderInfo: &pb.LeaderInfo{
+							LeaderId:      int32(s.leaderIndex),
+							LeaderAddress: s.serverList[s.leaderIndex],
+						},
+					}, nil
+				}
+
+				// Initiate rollback if any servers approved
+				if len(positiveServers) > 0 {
+					s.RollbackOperation(s.currentTerm, "lock_acquire", clientID, positiveServers)
+				}
+
+				return &pb.Response{
+					Status:  pb.Status_LOCK_ERROR,
+					Message: fmt.Sprintf("Failed to acquire lock: %v", err),
+				}, nil
+			}
+
+			s.lockHolder = clientID
+
+			log.Printf("Lock granted to client %d", clientID)
 			return &pb.Response{Status: pb.Status_SUCCESS}, nil
 		}
 		s.queueMutex.Unlock()
@@ -205,11 +293,6 @@ func (s *server) LockAcquire(ctx context.Context, in *pb.LockArgs) (*pb.Response
 			}
 			s.queueMutex.Unlock()
 
-			// Remove client from heartbeat-checking
-			// s.heartbeatMutex.Lock()
-			// delete(s.lastHeartbeat, clientID)
-			// s.heartbeatMutex.Unlock()
-
 			return nil, ctx.Err()
 		default:
 			// Continue waiting
@@ -221,11 +304,24 @@ func (s *server) LockRelease(ctx context.Context, in *pb.LockArgs) (*pb.Response
 	clientID := in.ClientId
 	log.Printf("Lock release request from client %d", clientID)
 
+	// Check if we are the leader
+	if s.leaderIndex != int(s.serverId) {
+		log.Printf("Non-leader server %d redirecting lock_release request", s.serverId)
+		return &pb.Response{
+			Status:  pb.Status_REDIRECT,
+			Message: "Not the leader server",
+			LeaderInfo: &pb.LeaderInfo{
+				LeaderId:      int32(s.leaderIndex),
+				LeaderAddress: s.serverList[s.leaderIndex],
+			},
+		}, nil
+	}
+
 	s.queueMutex.Lock()
-	defer s.queueMutex.Unlock()
 
 	// Verify the client holds the lock
 	if s.lockHolder != clientID {
+		s.queueMutex.Unlock()
 		log.Printf("Client %d attempted to release a lock it doesn't hold", clientID)
 		return &pb.Response{
 			Status:  pb.Status_LOCK_ERROR,
@@ -233,6 +329,39 @@ func (s *server) LockRelease(ctx context.Context, in *pb.LockArgs) (*pb.Response
 		}, nil
 	}
 
+	// Release mutex during consensus to avoid blocking
+	s.queueMutex.Unlock()
+
+	// Get consensus for the lock release
+	_, positiveServers, err := s.ReplicateAndGetConsensus("lock_release", clientID, 0)
+
+	if err != nil {
+		log.Printf("Failed to replicate lock_release: %v", err)
+
+		// Check if we're still the leader
+		if s.leaderIndex != int(s.serverId) {
+			return &pb.Response{
+				Status:  pb.Status_REDIRECT,
+				Message: "Leadership changed during operation",
+				LeaderInfo: &pb.LeaderInfo{
+					LeaderId:      int32(s.leaderIndex),
+					LeaderAddress: s.serverList[s.leaderIndex],
+				},
+			}, nil
+		}
+
+		// Initiate rollback if any servers approved
+		if len(positiveServers) > 0 {
+			s.RollbackOperation(s.currentTerm, "lock_release", clientID, positiveServers)
+		}
+
+		return &pb.Response{
+			Status:  pb.Status_LOCK_ERROR,
+			Message: fmt.Sprintf("Failed to release lock: %v", err),
+		}, nil
+	}
+
+	s.queueMutex.Lock()
 	// Release the lock
 	if len(s.waitQueue) > 0 {
 		// Grant lock to the next client in queue
@@ -250,7 +379,9 @@ func (s *server) LockRelease(ctx context.Context, in *pb.LockArgs) (*pb.Response
 		s.lockHolder = 0
 		log.Printf("Lock released and is now free")
 	}
+	s.queueMutex.Unlock()
 
+	log.Printf("Lock successfully released by client %d", clientID)
 	return &pb.Response{Status: pb.Status_SUCCESS}, nil
 }
 
@@ -262,6 +393,20 @@ func (s *server) FileAppend(ctx context.Context, in *pb.FileArgs) (*pb.Response,
 
 	log.Printf("File append request from client %d for file %s", clientID, filename)
 
+	// Check if we are the leader
+	if s.leaderIndex != int(s.serverId) {
+		log.Printf("Non-leader server %d redirecting file_append request", s.serverId)
+		return &pb.Response{
+			Status:  pb.Status_REDIRECT,
+			Message: "Not the leader server",
+			LeaderInfo: &pb.LeaderInfo{
+				LeaderId:      int32(s.leaderIndex),
+				LeaderAddress: s.serverList[s.leaderIndex],
+			},
+		}, nil
+	}
+
+	// Check for duplicate requests (idempotence)
 	s.processedRequestsMutex.Lock()
 	curSeqNum, exists := s.processedRequests[clientID]
 	if exists && curSeqNum >= seq_num {
@@ -283,11 +428,42 @@ func (s *server) FileAppend(ctx context.Context, in *pb.FileArgs) (*pb.Response,
 	}
 	s.queueMutex.Unlock()
 
+	// Get consensus for the file append
+	_, positiveServers, err := s.ReplicateAndGetConsensus("file_append", clientID, seq_num)
+
+	if err != nil {
+		log.Printf("Failed to replicate file_append: %v", err)
+
+		// Check if we're still the leader
+		if s.leaderIndex != int(s.serverId) {
+			return &pb.Response{
+				Status:  pb.Status_REDIRECT,
+				Message: "Leadership changed during operation",
+				LeaderInfo: &pb.LeaderInfo{
+					LeaderId:      int32(s.leaderIndex),
+					LeaderAddress: s.serverList[s.leaderIndex],
+				},
+			}, nil
+		}
+
+		if len(positiveServers) > 0 {
+			s.RollbackOperation(s.currentTerm, "lock_release", clientID, positiveServers)
+		}
+		return &pb.Response{
+			Status:  pb.Status_FILE_ERROR,
+			Message: fmt.Sprintf("Failed to get consensus for file append: %v", err),
+		}, nil
+	}
+
 	// Attempt to open and append to the file
-	fiilePath := fmt.Sprintf("data/%s", filename)
-	file, err := os.OpenFile(fiilePath, os.O_APPEND|os.O_WRONLY, 0644)
+	filePath := fmt.Sprintf("data/%s", filename)
+	file, err := os.OpenFile(filePath, os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
 		log.Printf("Failed to open file %s: %v", filename, err)
+
+		// Rollback the operation on other servers
+		s.RollbackOperation(s.currentTerm, "file_append", clientID, positiveServers)
+
 		return &pb.Response{Status: pb.Status_FILE_ERROR}, nil
 	}
 	defer file.Close()
@@ -295,6 +471,10 @@ func (s *server) FileAppend(ctx context.Context, in *pb.FileArgs) (*pb.Response,
 	_, err = file.Write(content)
 	if err != nil {
 		log.Printf("Failed to append to file %s: %v", filename, err)
+
+		// Rollback the operation on other servers
+		s.RollbackOperation(s.currentTerm, "file_append", clientID, positiveServers)
+
 		return &pb.Response{Status: pb.Status_FILE_ERROR}, nil
 	}
 
@@ -304,16 +484,6 @@ func (s *server) FileAppend(ctx context.Context, in *pb.FileArgs) (*pb.Response,
 	s.processedRequestsMutex.Unlock()
 
 	log.Printf("Successfully appended to file %s", filename)
-
-	// if loss {
-	// 	// Simulate a network loss scenario
-	// 	loss = false
-	// 	log.Printf("Simulating network loss for client %d", clientID)
-	// 	return nil, fmt.Errorf("simulated network loss")
-	// } else {
-	// 	loss = true
-	// }
-
 	return &pb.Response{Status: pb.Status_SUCCESS}, nil
 }
 
@@ -321,14 +491,26 @@ func (s *server) ClientClose(ctx context.Context, in *pb.Int) (*pb.Int, error) {
 	clientID := in.Rc
 	log.Printf("Client %d disconnecting", clientID)
 
-	// s.clientMutex.Lock()
-	// delete(s.clients, clientID)
-	// s.clientMutex.Unlock()
+	// Check if we are the leader
+	if s.leaderIndex != int(s.serverId) {
+		log.Printf("Non-leader server %d redirecting client_close request", s.serverId)
+		return &pb.Int{Rc: -1}, fmt.Errorf("not leader, contact %s", s.serverList[s.leaderIndex])
+	}
 
-	// Remove from heartbeat tracking
-	// s.heartbeatMutex.Lock()
-	// delete(s.lastHeartbeat, clientID)
-	// s.heartbeatMutex.Unlock()
+	// Get consensus for client close
+	_, _, err := s.ReplicateAndGetConsensus("client_close", clientID, 0)
+
+	if err != nil {
+		log.Printf("Failed to replicate client_close: %v", err)
+
+		// Check if we're still the leader - if not, redirect
+		if s.leaderIndex != int(s.serverId) {
+			return &pb.Int{Rc: -1}, fmt.Errorf("leadership changed, contact %s",
+				s.serverList[s.leaderIndex])
+		}
+
+		return nil, fmt.Errorf("failed to close client: %v", err)
+	}
 
 	// If the client held the lock, release it
 	s.queueMutex.Lock()
@@ -357,13 +539,27 @@ func (s *server) ClientClose(ctx context.Context, in *pb.Int) (*pb.Int, error) {
 
 func main() {
 	// Define command-line flags
-	createFilesFlag := flag.Bool("create-files", true, "Create data files on startup")
+	createFilesFlag := flag.Bool("create-files", false, "Create data files on startup")
 	loadStateFlag := flag.Bool("load-state", false, "Load server state from disk on startup")
+	serverIdFlag := flag.Int("id", 0, "Server ID (0-based index)")
+	serverPortFlag := flag.Int("port", 50051, "Server port")
 
 	// Parse the flags
 	flag.Parse()
 
-	port := 50051
+	// Server list - hardcoded for now
+	serverList := []string{
+		"localhost:50051", // Server 0 (leader)
+		"localhost:50052", // Server 1
+		"localhost:50053", // Server 2
+		"localhost:50054", // Server 3
+		"localhost:50055", // Server 4
+	}
+
+	serverId := *serverIdFlag
+	port := *serverPortFlag
+
+	// Setup listener
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
 		log.Fatalf("Failed to listen: %v", err)
@@ -380,16 +576,22 @@ func main() {
 		log.Printf("Skipping file creation")
 	}
 
-	s := grpc.NewServer()
+	// Create server instance with consensus fields
 	lockServer := &server{
-		clientCounter: 0,
-		lockHolder:    0,
-		lockTimeout:   30,
-		waitQueue:     make([]int32, 0),
-		// clients:       make(map[int32]bool),
-		// lastHeartbeat:     make(map[int32]time.Time),
+		clientCounter:     0,
+		lockHolder:        0,
+		lockTimeout:       30,
+		waitQueue:         make([]int32, 0),
 		processedRequests: make(map[int32]int64),
-		stateFile:         "lock_server_state.json",
+		stateFile:         fmt.Sprintf("lock_server_state_%d.json", serverId),
+
+		// Consensus-related fields
+		serverId:         int32(serverId),
+		serverList:       serverList,
+		leaderIndex:      0, // Server 0 is leader for now
+		currentTerm:      1, // Start at term 1
+		currentLogNumber: 0, // Start with log number 0
+		timerGeneration:  0,
 	}
 
 	// Attempt to recover state if flag is true
@@ -400,10 +602,12 @@ func main() {
 				lockServer.lockHolder = state.LockHolder
 				lockServer.waitQueue = state.WaitQueue
 				lockServer.processedRequests = state.ProcessedRequests
-				// lockServer.lastHeartbeat = make(map[int32]time.Time)
-				// for clientID := range state.LastHeartbeat {
-				// 	lockServer.lastHeartbeat[clientID] = time.Now()
-				// }
+
+				// Recover consensus state
+				lockServer.currentTerm = state.CurrentTerm
+				lockServer.currentLogNumber = state.CurrentLogNumber
+				lockServer.leaderIndex = state.LeaderIndex
+
 				log.Printf("Recovered server state from disk")
 			} else {
 				log.Printf("Failed to parse state file: %v", err)
@@ -415,74 +619,34 @@ func main() {
 		log.Printf("Skipping state recovery")
 	}
 
-	// Start persistence goroutine
+	// Start background tasks
 	go lockServer.persistState()
-
-	// Starting heartbeat checker goroutine
-	// go lockServer.checkHeartbeats()
-
-	// Starting lock timeout checker goroutine
 	go lockServer.checkLockTimeout()
 
+	// Initialize election with the correct starting state
+	lockServer.InitializeElection()
+
+	// If this is server 0, make it the initial leader
+	if serverId == 0 && *createFilesFlag {
+		log.Printf("Server %d: Initializing with create files flag: %v", serverId, *createFilesFlag)
+		lockServer.serverState = LEADER
+		// time.Sleep(time.Duration(10) * time.Second)
+		log.Printf("sending beats")
+		// Start sending heartbeats immediately
+		// go lockServer.sendHeartbeats()
+	}
+
+	// Register with gRPC
+	s := grpc.NewServer()
 	pb.RegisterLockServiceServer(s, lockServer)
 
-	log.Printf("Lock server listening on port %d", port)
+	log.Printf("Lock server %d listening on port %d (leader: %v)",
+		serverId, port, serverId == lockServer.leaderIndex)
+
 	if err := s.Serve(lis); err != nil {
 		log.Fatalf("Failed to serve: %v", err)
 	}
 }
-
-/*
-func (s *server) checkHeartbeats() {
-	heartbeatTimeout := 5 * time.Second
-	ticker := time.NewTicker(1 * time.Second)
-
-	for {
-		<-ticker.C
-		now := time.Now()
-
-		s.heartbeatMutex.Lock()
-		// s.clientMutex.Lock()
-
-		// Check for inactive clients
-		for clientID, lastBeat := range s.lastHeartbeat {
-			if now.Sub(lastBeat) > heartbeatTimeout {
-				log.Printf("Client %d considered inactive (no heartbeat for %v)", clientID, heartbeatTimeout)
-
-				// Handle inactive client, similar to what happens in ctx.Done()
-				// Clean up wait queue
-				s.queueMutex.Lock()
-				for i, id := range s.waitQueue {
-					if id == clientID {
-						s.waitQueue = append(s.waitQueue[:i], s.waitQueue[i+1:]...)
-						break
-					}
-				}
-
-				// Release lock if client was the holder
-				if s.lockHolder == clientID {
-					if len(s.waitQueue) > 0 {
-						s.lockHolder = s.waitQueue[0]
-						s.waitQueue = s.waitQueue[1:]
-						log.Printf("Lock transferred to client %d after previous holder inactive", s.lockHolder)
-					} else {
-						s.lockHolder = 0
-						log.Printf("Lock released after holder inactive")
-					}
-				}
-				s.queueMutex.Unlock()
-
-				// Remove client records
-				// delete(s.clients, clientID)
-				delete(s.lastHeartbeat, clientID)
-			}
-		}
-
-		// s.clientMutex.Unlock()
-		s.heartbeatMutex.Unlock()
-	}
-}
-*/
 
 func (s *server) checkLockTimeout() {
 	ticker := time.NewTicker(1 * time.Second)
