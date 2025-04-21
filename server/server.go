@@ -50,6 +50,7 @@ type server struct {
 	votes             map[int32]bool // Votes received in current election
 	votesMutex        sync.Mutex     // Protects vote counting
 	heartbeatInterval time.Duration  // Interval between heartbeats (leader only)
+	timerGeneration   int64          // Generation number for the current election timer
 }
 
 type serverState struct {
@@ -588,6 +589,7 @@ func main() {
 		leaderIndex:      0, // Server 0 is leader for now
 		currentTerm:      1, // Start at term 1
 		currentLogNumber: 0, // Start with log number 0
+		timerGeneration:  0,
 	}
 
 	// Attempt to recover state if flag is true

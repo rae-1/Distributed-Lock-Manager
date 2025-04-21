@@ -23,11 +23,11 @@ const (
 
 // Constants for timeouts (milliseconds)
 const (
-	MIN_ELECTION_TIMEOUT  = 8200
-	MAX_ELECTION_TIMEOUT  = 12200
-	HEARTBEAT_INTERVAL    = 3000
-	VOTE_RESPONSE_TIMEOUT = 5000
-	RPC_TIMEOUT           = 5000
+	MIN_ELECTION_TIMEOUT  = 2500
+	MAX_ELECTION_TIMEOUT  = 15000
+	HEARTBEAT_INTERVAL    = 700
+	VOTE_RESPONSE_TIMEOUT = 500
+	RPC_TIMEOUT           = 500
 )
 
 // Initialize election components of the server
@@ -47,24 +47,93 @@ func (s *server) InitializeElection() {
 // RunElectionMonitor continuously monitors and manages the election state
 func (s *server) runElectionMonitor() {
 	for {
-		switch s.getState() {
+		state := s.getState()
+		switch state {
 		case FOLLOWER:
 			// In follower state, wait for the election timer to expire
 			log.Printf("Server %d: Waiting for election timer to expire...", s.serverId)
-			<-s.electionTimer.C
-			log.Printf("Server %d: Election timer expired, starting election", s.serverId)
-			s.startElection()
+
+			// Capture current timer to avoid racing with resetElectionTimer
+			s.lockTimerMutex.Lock()
+			currentTimer := s.electionTimer
+			timerGeneration := s.timerGeneration // Add a generation counter
+			s.lockTimerMutex.Unlock()
+
+			// Create a channel to signal timer reset
+			timerResetCh := make(chan struct{})
+
+			// Start goroutine to monitor timer generation
+			go func() {
+				for {
+					time.Sleep(500 * time.Millisecond)
+					s.lockTimerMutex.Lock()
+					if s.timerGeneration != timerGeneration {
+						// Timer was reset, signal to exit the wait
+						s.lockTimerMutex.Unlock()
+						close(timerResetCh)
+						return
+					}
+					s.lockTimerMutex.Unlock()
+				}
+			}()
+
+			// Wait for either timer expiration or reset
+			select {
+			case <-currentTimer.C:
+				// Timer expired normally
+				if s.getState() == FOLLOWER {
+					log.Printf("Server %d: Election timer expired, starting election", s.serverId)
+					s.startElection()
+				}
+			case <-timerResetCh:
+				// Timer was reset (due to heartbeat), restart the loop
+				log.Printf("Server %d: Timer was reset, restarting monitor", s.serverId)
+				continue
+			}
 
 		case CANDIDATE:
 			// In candidate state, wait for either:
 			// 1. Election success (becoming leader)
 			// 2. Another leader emerging (becoming follower)
 			// 3. Election timeout (starting new election)
-			<-s.electionTimer.C
-			// If we're still a candidate after timeout, start a new election
-			if s.getState() == CANDIDATE {
-				log.Printf("Server %d: Election timed out, starting new election", s.serverId)
-				s.startElection()
+			log.Printf("Server %d: Waiting for candidate election timeout...", s.serverId)
+
+			// Capture current timer to avoid racing with resetElectionTimer
+			s.lockTimerMutex.Lock()
+			currentTimer := s.electionTimer
+			timerGeneration := s.timerGeneration
+			s.lockTimerMutex.Unlock()
+
+			// Create a channel to signal timer reset
+			timerResetCh := make(chan struct{})
+
+			// Start goroutine to monitor timer generation
+			go func() {
+				for {
+					time.Sleep(500 * time.Millisecond)
+					s.lockTimerMutex.Lock()
+					if s.timerGeneration != timerGeneration {
+						// Timer was reset, signal to exit the wait
+						s.lockTimerMutex.Unlock()
+						close(timerResetCh)
+						return
+					}
+					s.lockTimerMutex.Unlock()
+				}
+			}()
+
+			// Wait for either timer expiration or reset
+			select {
+			case <-currentTimer.C:
+				// Timer expired normally
+				if s.getState() == CANDIDATE {
+					log.Printf("Server %d: Election timed out, starting new election", s.serverId)
+					s.startElection()
+				}
+			case <-timerResetCh:
+				// Timer was reset (due to becoming follower or leader), restart the loop
+				log.Printf("Server %d: Timer was reset during candidacy, restarting monitor", s.serverId)
+				continue
 			}
 
 		case LEADER:
@@ -77,6 +146,9 @@ func (s *server) runElectionMonitor() {
 
 // Reset the election timer with a random timeout
 func (s *server) resetElectionTimer() {
+	s.lockTimerMutex.Lock()
+	defer s.lockTimerMutex.Unlock()
+
 	if s.electionTimer != nil {
 		s.electionTimer.Stop()
 	}
@@ -84,7 +156,7 @@ func (s *server) resetElectionTimer() {
 	// Random timeout between MIN_ELECTION_TIMEOUT and MAX_ELECTION_TIMEOUT
 	timeout := MIN_ELECTION_TIMEOUT + rand.Intn(MAX_ELECTION_TIMEOUT-MIN_ELECTION_TIMEOUT)
 	s.electionTimeout = time.Duration(timeout) * time.Millisecond
-
+	s.timerGeneration++ // Increment the generation counter
 	s.electionTimer = time.NewTimer(s.electionTimeout)
 	log.Printf("Server %d: Reset election timer to %v", s.serverId, s.electionTimeout)
 }
@@ -263,6 +335,7 @@ func (s *server) RequestVote(ctx context.Context, req *pb.VoteRequest) (*pb.Vote
 		log.Printf("Server %d: Discovered higher term %d, updating", s.serverId, req.Term)
 		s.currentTerm = req.Term
 		s.becomeFollower(req.Term, -1)
+		s.votedFor = -1
 	}
 
 	// Check if we've already voted or can vote for this candidate

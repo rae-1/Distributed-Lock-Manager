@@ -30,6 +30,8 @@ func main() {
 
 		option := getInput()
 
+		time.Sleep(2 * time.Second) // Simulate some processing time
+
 		switch option {
 		case "1":
 			initializeClient()

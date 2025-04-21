@@ -67,7 +67,7 @@ func (s *server) ReplicateAndGetConsensus(operation string, clientID int32, seqN
 			client := pb.NewLockServiceClient(conn)
 
 			// Send log entry with short timeout
-			ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 			defer cancel()
 
 			resp, err := client.ReplicateLog(ctx, &entry)
@@ -157,7 +157,7 @@ func (s *server) RollbackOperation(term int64, operation string, clientID int32,
 			client := pb.NewLockServiceClient(conn)
 
 			// Send rollback request
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 			defer cancel()
 
 			rollbackReq := &pb.RollbackRequest{
@@ -373,14 +373,14 @@ func (s *server) Rollback(ctx context.Context, in *pb.RollbackRequest) (*pb.Resp
 }
 
 // GetLeader implements the get_leader RPC
-func (s *server) GetLeader(ctx context.Context, in *pb.Int) (*pb.LeaderInfo, error) {
-	s.termMutex.Lock()
-	defer s.termMutex.Unlock()
+// func (s *server) GetLeader(ctx context.Context, in *pb.Int) (*pb.LeaderInfo, error) {
+// 	s.termMutex.Lock()
+// 	defer s.termMutex.Unlock()
 
-	// In this phase, server 0 is always the leader
-	leaderIdx := s.leaderIndex
-	return &pb.LeaderInfo{
-		LeaderId:      int32(leaderIdx),
-		LeaderAddress: s.serverList[leaderIdx],
-	}, nil
-}
+// 	// In this phase, server 0 is always the leader
+// 	leaderIdx := s.leaderIndex
+// 	return &pb.LeaderInfo{
+// 		LeaderId:      int32(leaderIdx),
+// 		LeaderAddress: s.serverList[leaderIdx],
+// 	}, nil
+// }
