@@ -109,3 +109,39 @@ The system uses a leader-based consensus protocol inspired by Raft:
 - The system can tolerate failures of a minority of servers
 - Automatic leader election when the current leader fails
 - State persistence for crash recovery
+
+## Performance
+
+We conducted performance testing to evaluate the system's throughput characteristics under different configurations. The testing methodology involved:
+
+1. Varying the number of concurrent clients (5-50)
+2. Testing with different server cluster sizes (3, 4, and 5 servers)
+3. Each client performing a complete operation cycle: lock acquisition, file append, and lock release
+4. Measuring throughput in operations per second
+
+The results show how throughput varies with increasing client load and different server configurations:
+
+![Performance Results](./perf/performance_plots.png)
+
+**Average Throughput (ops/sec) by Server Count:**
+- 3 servers: 27.68
+- 4 servers: 24.93
+- 5 servers: 19.66
+
+**Overall average throughput:** 24.09
+
+
+We also conducted a specialized performance test focusing solely on append operations. This test isolates the file append performance by:
+
+1. Acquiring the lock once per client
+2. Performing multiple append operations (100) while holding the lock
+3. Measuring only the time spent on append operations, excluding lock acquisition/release overhead
+
+| Active Nodes | Total Append Time | Average Time per Append | Append Throughput |
+|:------------:|:-----------------:|:-----------------------:|:-----------------:|
+| 5 nodes      | 398.97 ms         | 3.98 ms                 | 250.64 ops/sec    |
+| 4 nodes      | 450.59 ms         | 4.50 ms                 | 221.93 ops/sec    |
+| 3 nodes      | 515.12 ms         | 5.15 ms                 | 194.13 ops/sec    |
+
+These results highlight that the actual file operations are quite efficient (194-250 ops/sec), with most of the overhead in the complete lock-acquire-append-release cycle coming from lock management operations.
+
